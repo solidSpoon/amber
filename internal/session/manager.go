@@ -73,7 +73,10 @@ type liveSession struct {
 	inspector Inspector
 	// recordingStartMs 录像起点（容器内 .recording.json 的墙钟毫秒）。
 	recordingStartMs int64
-	lastActivity     time.Time
+	// viewportW/H 上次量到的页面视口尺寸。窗口变化靠它判断：
+	// 视口（client area）和窗口矩形（含边框/装饰）不是一回事，不能互相比较。
+	viewportW, viewportH int
+	lastActivity         time.Time
 }
 
 // Options 创建会话的输入。
@@ -158,7 +161,7 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 
 	// 先把产物落地、读自述、对素材槽位：这些都在起容器之前做完，
 	// 配错了立刻失败，而不是让容器跑到一半才发现入口不存在。
-	payload, err := m.resolvePayload(ctx, dir, opts.Payload, opts.Assets)
+	payload, err := m.resolvePayload(ctx, dir, opts.Payload, opts.Assets, true)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return store.Session{}, err
@@ -257,7 +260,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 	cdpPort := sess.CDPPort
 	vncPort := sess.VNCPort
 
-	payload, err := m.resolvePayload(ctx, sess.Dir, sess.Payload, decodeAssets(sess.Assets))
+	payload, err := m.resolvePayload(ctx, sess.Dir, sess.Payload, decodeAssets(sess.Assets), false)
 	if err != nil {
 		sess.Status = store.StatusFailed
 		sess.Error = err.Error()
@@ -453,6 +456,11 @@ func (m *Manager) finalize(ctx context.Context, sess store.Session, verdict, sum
 
 	m.releaseSources(ctx, sess)
 
+	// 产物/素材快照是"输入"，不是证据：会话收尾就删，别把 1GB 的应用复制留在证据目录里。
+	// 进程被杀留下的残留由启动时的 CleanupSnapshots 兜底。
+	_ = os.RemoveAll(filepath.Join(sess.Dir, "payload"))
+	_ = os.RemoveAll(filepath.Join(sess.Dir, "assets"))
+
 	videoPath := filepath.Join(sess.Dir, "video", "session.mp4")
 	if info, err := os.Stat(videoPath); err == nil {
 		sess.VideoPath = videoPath
@@ -577,6 +585,10 @@ func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx 
 		ok = *step.Passed
 	}
 	m.writeEvent(ctx, id, step, msg, artifact, duration.Milliseconds(), ok, offset)
+
+	// 应用可能在动作的副作用里自己改窗口（登录后切全屏、从大窗缩回默认尺寸）。
+	// 记在动作之后：报告里的顺序就是「点了什么 → 应用因此变成了什么样」。
+	m.syncFrame(ctx, id, insp)
 
 	if callErr != nil {
 		return "", artifact, callErr
@@ -1007,4 +1019,97 @@ func (m *Manager) archiveContainerLogs(ctx context.Context, container, sessionDi
 		return "", err
 	}
 	return path, nil
+}
+
+// syncFrame 对一次窗口几何：和上次不同就更新会话的 frame。
+//
+// 为什么不只在就绪时量一次：应用的登录/引导结束时会自己切窗口状态
+// （实测 DashPlayer 点「Start using」后从 1920×1080 缩回 960×540），
+// 之后录像里就是「小窗 + 大桌面」，显示层还按旧的几何裁剪。
+func (m *Manager) syncFrame(ctx context.Context, id string, insp Inspector) {
+	measurer, ok := insp.(interface {
+		Viewport(ctx context.Context) (int, int, error)
+	})
+	if !ok {
+		return
+	}
+	width, height, err := measurer.Viewport(ctx)
+	if err != nil || width <= 0 || height <= 0 {
+		return
+	}
+
+	// 先用"视口和上次是否一样"判断有没有变化——视口每帧都能读到，便宜且不会误报。
+	m.mu.Lock()
+	live, alive := m.live[id]
+	if !alive {
+		m.mu.Unlock()
+		return
+	}
+	changed := live.viewportW != width || live.viewportH != height
+	live.viewportW, live.viewportH = width, height
+	m.mu.Unlock()
+	if !changed {
+		return
+	}
+
+	sess, err := m.Get(ctx, id)
+	if err != nil {
+		return
+	}
+	// 视口变了，现量一次精确的窗口矩形（含位置）；量不到就按左上角+视口尺寸算
+	frame := store.Rect{X: sess.Frame.X, Y: sess.Frame.Y, Width: width, Height: height}
+	display := sess.Display
+	if exact, gotDisplay, geoErr := m.probeWindowGeometry(ctx, "rigd-"+id); geoErr == nil {
+		frame, display = exact, gotDisplay
+	}
+	if !display.Known() {
+		display = store.Rect{Width: m.cfg.Display.Width, Height: m.cfg.Display.Height}
+	}
+	prev := sess.Frame
+	if prev.Known() && prev == frame {
+		return // 视口变了但窗口矩形没变（滚动条出现/消失），不是真的改窗口
+	}
+	sess.Frame, sess.Display = frame, display
+	if err := m.store.UpdateSession(ctx, sess); err != nil {
+		m.log.Warn("更新画面几何失败", "session", id, "err", err)
+		return
+	}
+	m.mu.Lock()
+	if current, ok := m.live[id]; ok {
+		current.session.Frame = sess.Frame
+		current.session.Display = sess.Display
+	}
+	m.mu.Unlock()
+
+	// 这是证据，不是内部细节：应用自己把窗口缩小了，评审必须看得见。
+	// 记成报告里独立的一步（带当时的画面），而不是一行服务端日志。
+	note := Step{
+		Tool: "window",
+		Kind: "note",
+		Args: map[string]any{
+			"from": fmt.Sprintf("%dx%d", prev.Width, prev.Height),
+			"to":   fmt.Sprintf("%dx%d", frame.Width, frame.Height),
+		},
+		Caption: fmt.Sprintf("窗口尺寸变化：%dx%d → %dx%d", prev.Width, prev.Height, frame.Width, frame.Height),
+	}
+	note.Shot = m.captureShot(ctx, sess.Dir, insp, note)
+	m.writeEvent(ctx, id, note, "应用自己调整了窗口尺寸，画面几何已更新", "", 0, true, m.videoOffset(id))
+	m.log.Info("窗口尺寸变化", "session", id,
+		"from", fmt.Sprintf("%dx%d", prev.Width, prev.Height),
+		"to", fmt.Sprintf("%dx%d", frame.Width, frame.Height))
+}
+
+// videoOffset 当前时刻在录像里的偏移量（毫秒）；录像还没开始或已收尾时返回 -1。
+func (m *Manager) videoOffset(id string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	live, ok := m.live[id]
+	if !ok || live.recordingStartMs <= 0 {
+		return -1
+	}
+	offset := time.Now().UnixMilli() - live.recordingStartMs
+	if offset < 0 {
+		return 0
+	}
+	return offset
 }

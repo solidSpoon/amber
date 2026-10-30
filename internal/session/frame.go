@@ -56,7 +56,7 @@ func (m *Manager) fitWindow(ctx context.Context, container string) error {
 	return nil
 }
 
-// readWindowGeometry 读容器写的画面几何。读不到不算错误——旧镜像没有这一步。
+// readWindowGeometry 读容器写的画面几何（rig-fit-window 落盘的那份）。
 func (m *Manager) readWindowGeometry(ctx context.Context, container string) (store.Rect, store.Rect, error) {
 	out, err := m.docker.Exec(ctx, container, "cat", "/out/logs/window.json")
 	if err != nil {
@@ -135,4 +135,29 @@ func (m *Manager) Poster(ctx context.Context, id string) (string, error) {
 		return "", errors.New("封装文件里没有可用的帧")
 	}
 	return poster, nil
+}
+
+// probeWindowGeometry 现量一次窗口几何（只读，不改窗口）。
+//
+// 和 readWindowGeometry 的区别很重要：那个读的是 window.json（铺满那一刻的快照），
+// 应用后来自己改了窗口，文件不会变。想知道"现在多大"，只能现场量。
+func (m *Manager) probeWindowGeometry(ctx context.Context, container string) (store.Rect, store.Rect, error) {
+	display := fmt.Sprintf("DISPLAY=:%d", m.cfg.Display.Num)
+	out, err := m.docker.Exec(ctx, container, "env", display, "rig-window-geometry")
+	if err != nil {
+		return store.Rect{}, store.Rect{}, err
+	}
+	var meta windowMeta
+	if err := json.Unmarshal([]byte(out), &meta); err != nil {
+		return store.Rect{}, store.Rect{}, fmt.Errorf("解析窗口几何失败: %w", err)
+	}
+	displayRect := store.Rect{Width: meta.Display.Width, Height: meta.Display.Height}
+	frame := store.Rect{
+		X: meta.Window.X, Y: meta.Window.Y,
+		Width: meta.Window.Width, Height: meta.Window.Height,
+	}
+	if !displayRect.Known() || !frame.Known() {
+		return store.Rect{}, store.Rect{}, errors.New("量不到窗口几何")
+	}
+	return frame, displayRect, nil
 }

@@ -125,6 +125,13 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 		},
 	})
 
+	// 上次进程如果被强杀，会话目录里可能留着几百 MB 的产物快照；启动时清一遍。
+	if n, err := manager.CleanupSnapshots(context.Background()); err != nil {
+		logger.Warn("清理产物快照失败", "err", err)
+	} else if n > 0 {
+		logger.Info("已清理残留的产物快照", "count", n)
+	}
+
 	// 产物回收：会话结束会立刻归还引用；这里兜住进程被杀、上传传一半留下的垃圾。
 	go func() {
 		ticker := time.NewTicker(time.Hour)

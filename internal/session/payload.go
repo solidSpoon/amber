@@ -104,7 +104,10 @@ type assetMount struct {
 }
 
 // resolvePayload 校验来源、物化产物、读自述、确定入口。
-func (m *Manager) resolvePayload(ctx context.Context, dir, raw string, assets map[string]string) (payloadInput, error) {
+// materialize=true 表示"从源把字节铺出来"（Prepare 用）；Provision 里传 false，
+// 因为快照在上一步已经做好了——再铺一遍会把快照里的硬链接当成普通文件覆盖，
+// 甚至顺着链接把宿主上的原文件截断。
+func (m *Manager) resolvePayload(ctx context.Context, dir, raw string, assets map[string]string, materialize bool) (payloadInput, error) {
 	src, err := ParseSource(raw)
 	if err != nil {
 		return payloadInput{}, err
@@ -119,15 +122,25 @@ func (m *Manager) resolvePayload(ctx context.Context, dir, raw string, assets ma
 		if statErr != nil || !info.IsDir() {
 			return payloadInput{}, fmt.Errorf("产物目录不存在：%s", src.Path)
 		}
-		input.Dir = src.Path
+		// 起会话就把目录"定格"：硬链接快照到会话目录，不占额外磁盘。
+		// 不做这一步的话，容器看的是宿主的实时视图——你在会话跑着的时候重新打包，
+		// /app 会在半路变成"一半旧文件一半新文件"，这次验收的证据就废了。
+		input.Dir = filepath.Join(dir, "payload")
+		if materialize {
+			if err := snapshotTree(src.Path, input.Dir); err != nil {
+				return payloadInput{}, err
+			}
+		}
 	} else {
 		manifest, err := m.store.GetManifest(ctx, src.Digest)
 		if err != nil {
 			return payloadInput{}, fmt.Errorf("产物 manifest 不存在：%w", err)
 		}
 		input.Dir = filepath.Join(dir, "payload")
-		if err := m.materialize(manifest, input.Dir); err != nil {
-			return payloadInput{}, err
+		if materialize {
+			if err := m.materialize(manifest, input.Dir); err != nil {
+				return payloadInput{}, err
+			}
 		}
 	}
 
@@ -138,7 +151,7 @@ func (m *Manager) resolvePayload(ctx context.Context, dir, raw string, assets ma
 		return payloadInput{}, err
 	}
 
-	input.Assets, err = m.resolveAssets(ctx, dir, input.Recipe.Assets, assets)
+	input.Assets, err = m.resolveAssets(ctx, dir, input.Recipe.Assets, assets, materialize)
 	if err != nil {
 		return payloadInput{}, err
 	}
@@ -288,7 +301,7 @@ func resolveEntry(dir string, recipe Recipe) (string, error) {
 }
 
 // resolveAssets 把调用方给的素材来源对到产物声明的槽位上。
-func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []AssetSlot, provided map[string]string) ([]assetMount, error) {
+func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []AssetSlot, provided map[string]string, materialize bool) ([]assetMount, error) {
 	byName := make(map[string]AssetSlot, len(slots))
 	for _, slot := range slots {
 		byName[slot.Name] = slot
@@ -321,15 +334,24 @@ func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []
 			if info, err := os.Stat(src.Path); err != nil || !info.IsDir() {
 				return nil, fmt.Errorf("素材目录不存在：%s", src.Path)
 			}
-			mount.Dir, mount.Kind = src.Path, "dir"
+			// 素材同样快照：一次会话里"给了哪些字节"必须是确定的
+			mount.Dir = filepath.Join(sessionDir, "assets", slot.Name)
+			if materialize {
+				if err := snapshotTree(src.Path, mount.Dir); err != nil {
+					return nil, err
+				}
+			}
+			mount.Kind = "dir"
 		case "manifest":
 			manifest, err := m.store.GetManifest(ctx, src.Digest)
 			if err != nil {
 				return nil, fmt.Errorf("素材 %q 的 manifest 不存在：%w", slot.Name, err)
 			}
 			mount.Dir = filepath.Join(sessionDir, "assets", slot.Name)
-			if err := m.materialize(manifest, mount.Dir); err != nil {
-				return nil, err
+			if materialize {
+				if err := m.materialize(manifest, mount.Dir); err != nil {
+					return nil, err
+				}
 			}
 			mount.Kind, mount.Key = "manifest", src.Digest
 		}
@@ -356,4 +378,99 @@ func decodeAssets(raw string) map[string]string {
 		return nil
 	}
 	return assets
+}
+
+// snapshotTree 把宿主目录硬链接复制到目标目录。
+//
+// 硬链接而不是真复制：1.3GB / 一万个文件的产物大约 1 秒、零额外磁盘，
+// 而且之后宿主上重新打包（写新文件或 rename 替换）不会透过链接影响这份快照。
+// 跨文件系统（builder 输出在另一个挂载点）时自动退化成复制。
+func snapshotTree(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return fmt.Errorf("读取 %s 失败: %w", src, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s 不是目录", src)
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("创建快照目录失败: %w", err)
+	}
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(target, 0o755)
+		case entryInfo.Mode()&os.ModeSymlink != 0:
+			// 符号链接按原样复制，不跟进去：跟进去会把链接目标的内容也带进快照
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		default:
+			return linkOrCopyFile(path, target, entryInfo.Mode())
+		}
+	})
+}
+
+// linkOrCopyFile 优先硬链接，失败（跨设备/权限）则复制。
+func linkOrCopyFile(src, dst string, mode os.FileMode) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	// 目标可能是上一次的硬链接（和 src 同一 inode），直接 O_TRUNC 会把 src 也清空
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// CleanupSnapshots 清掉已收尾会话留下的产物快照（启动时调一次）。
+//
+// 正常收尾会自己删；这里兜的是"进程被 kill / 机器断电"留下的几百 MB 到几 GB 目录。
+func (m *Manager) CleanupSnapshots(ctx context.Context) (int, error) {
+	sessions, err := m.store.ListSessions(ctx, 0)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, sess := range sessions {
+		if !sess.Status.Terminal() {
+			continue
+		}
+		for _, sub := range []string{"payload", "assets"} {
+			dir := filepath.Join(sess.Dir, sub)
+			if _, err := os.Stat(dir); err == nil {
+				if err := os.RemoveAll(dir); err == nil {
+					removed++
+				}
+			}
+		}
+	}
+	return removed, nil
 }

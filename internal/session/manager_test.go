@@ -417,6 +417,9 @@ func TestStartInjectsPayloadContract(t *testing.T) {
 	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
 		t.Fatalf("创建素材目录失败: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(mediaDir, "clip.mp4"), []byte("fake"), 0o644); err != nil {
+		t.Fatalf("写素材失败: %v", err)
+	}
 	if _, err := m.Start(ctx, Options{
 		Payload: "dir:" + payloadDir,
 		Assets:  map[string]string{"media": "dir:" + mediaDir},
@@ -437,14 +440,24 @@ func TestStartInjectsPayloadContract(t *testing.T) {
 			t.Fatalf("%s 期望 %q，实际 %q", key, value, spec.Env[key])
 		}
 	}
-	var hasMedia bool
+	// 素材现在是"起会话时快照"到会话目录再挂载：宿主目录事后改动不影响这次会话
+	var mediaSource string
 	for _, mount := range spec.Mounts {
-		if mount.ContainerPath == "/library" && mount.ReadOnly && mount.Source == mediaDir {
-			hasMedia = true
+		if mount.ContainerPath == "/library" {
+			if !mount.ReadOnly {
+				t.Fatalf("素材必须只读挂载: %+v", mount)
+			}
+			mediaSource = mount.Source
 		}
 	}
-	if !hasMedia {
+	if mediaSource == "" {
 		t.Fatalf("素材槽位没有挂到 /library: %+v", spec.Mounts)
+	}
+	if mediaSource == mediaDir {
+		t.Fatal("素材应挂载快照而不是宿主目录本身")
+	}
+	if raw, err := os.ReadFile(filepath.Join(mediaSource, "clip.mp4")); err != nil || string(raw) != "fake" {
+		t.Fatalf("快照内容不对: %q err=%v", raw, err)
 	}
 }
 
