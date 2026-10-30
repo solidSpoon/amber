@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeftIcon, ExternalLinkIcon, PauseIcon, PlayIcon } from 'lucide-react';
+import { ArrowLeftIcon, CheckIcon, ExternalLinkIcon, PauseIcon, PlayIcon, XIcon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScreenStage } from '@/components/screen-stage';
@@ -13,20 +12,16 @@ import { StatusBadge, VerdictBadge } from '@/components/session-badges';
 import { api, formatAgo, type LogSource, type Session, type SessionEvent } from '../api';
 
 /**
- * 会话详情：录像 + 操作时间线 + 日志。
+ * 会话详情 = 验收报告。
  *
- * 核心交互是「点操作 → 录像跳到那一刻」：两边用的是同一个基准（录像起点），
- * 所以这里直接用后端给的 videoOffsetMs，不再二次换算。
+ * 阅读路径是「步骤流」而不是「一条长录像」：每一步做了什么、为什么做、期望什么、
+ * 实际结果是什么、当时屏幕长什么样，都排在一列里往下读。录像退到附录，
+ * 每一步旁边那个 ▶ 才是它的入口——点开只看这 4 秒，不用拖进度条跳过模型的思考时间。
  */
 export default function SessionDetail({ id }: { id: string }) {
   const [session, setSession] = useState<Session | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [error, setError] = useState('');
-  const [selected, setSelected] = useState<number | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [time, setTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,21 +43,6 @@ export default function SessionDetail({ id }: { id: string }) {
     };
   }, [id]);
 
-  function seek(event: SessionEvent) {
-    setSelected(event.seq);
-    const video = videoRef.current;
-    if (!video || event.videoOffsetMs < 0) return;
-    video.currentTime = event.videoOffsetMs / 1000;
-    void video.play().catch(() => undefined);
-  }
-
-  function togglePlay() {
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.paused) void video.play().catch(() => undefined);
-    else video.pause();
-  }
-
   if (error) {
     return (
       <Alert variant="destructive">
@@ -81,35 +61,46 @@ export default function SessionDetail({ id }: { id: string }) {
     );
   }
 
-  const screenshots = events.filter((e) => e.artifact?.startsWith('screenshots/'));
-  // 录像整幅像素画得比窗口大，就说明录进去了一块桌面——界面要裁掉它，并且说清楚为什么。
-  const cropped =
-    !!session.frame &&
-    !!session.display &&
-    (session.frame.width !== session.display.width || session.frame.height !== session.display.height);
+  const asserts = events.filter((e) => e.kind === 'assert');
+  const failures = events.filter((e) => !e.ok);
+  const lastOffset = events.reduce((max, e) => Math.max(max, e.videoOffsetMs), 0);
 
   return (
-    <div className="flex flex-col gap-4">
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <Button variant="ghost" size="sm" render={<a href="#/sessions" />}>
-          <ArrowLeftIcon data-icon="inline-start" />
-          会话列表
-        </Button>
-        <h1 className="font-mono text-lg">{session.id}</h1>
-        <StatusBadge status={session.status} />
-        <VerdictBadge verdict={session.verdict} />
-        <Badge variant="outline">{session.app}</Badge>
-        <span className="font-mono text-xs text-muted-foreground">{session.ref || '—'}</span>
-        <span className="text-xs text-muted-foreground">
-          创建 {formatAgo(session.createdAt)} · 调试端口 {session.cdpPort}
-          {session.videoDurationMs > 0 ? ` · 录像 ${(session.videoDurationMs / 1000).toFixed(1)}s` : ''}
-          {session.frame ? ` · 画幅 ${session.frame.width}×${session.frame.height}` : ''}
-        </span>
+    <div className="flex flex-col gap-5">
+      <header className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <Button variant="ghost" size="sm" render={<a href="#/sessions" />}>
+            <ArrowLeftIcon data-icon="inline-start" />
+            会话列表
+          </Button>
+          <h1 className="font-mono text-lg">{session.id}</h1>
+          <StatusBadge status={session.status} />
+          <VerdictBadge verdict={session.verdict} />
+          <Badge variant="outline">{session.app}</Badge>
+          <span className="font-mono text-xs text-muted-foreground">{session.ref || '—'}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span>创建 {formatAgo(session.createdAt)}</span>
+          <span>{events.length} 步</span>
+          {asserts.length > 0 && (
+            <span>
+              {asserts.length} 条断言（{asserts.filter((a) => a.ok).length} 成立）
+            </span>
+          )}
+          {failures.length > 0 && <span className="text-destructive">{failures.length} 步失败</span>}
+          {lastOffset > 0 && <span>录像 {formatClock(lastOffset / 1000)}</span>}
+          {session.frame && (
+            <span>
+              画幅 {session.frame.width}×{session.frame.height}
+            </span>
+          )}
+          <span>调试端口 {session.cdpPort}</span>
+        </div>
       </header>
 
       {session.summary && (
         <Card>
-          <CardContent className="text-sm">{session.summary}</CardContent>
+          <CardContent className="text-sm leading-relaxed">{session.summary}</CardContent>
         </Card>
       )}
 
@@ -122,157 +113,238 @@ export default function SessionDetail({ id }: { id: string }) {
         </Alert>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <div className="flex min-w-0 flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>录像</CardTitle>
-              <CardDescription>
-                {cropped
-                  ? `录制时应用窗口没铺满虚拟屏（${session.display!.width}×${session.display!.height}），已按窗口区域裁剪显示。`
-                  : '点右侧任意一步，录像跳到那一刻。'}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-3">
-              {session.hasVideo ? (
-                <>
-                  <ScreenStage frame={session.frame} display={session.display}>
-                    <video
-                      ref={videoRef}
-                      preload="metadata"
-                      poster={`/api/sessions/${session.id}/poster`}
-                      src={`/api/sessions/${session.id}/video`}
-                      className="size-full"
-                      onPlay={() => setPlaying(true)}
-                      onPause={() => setPlaying(false)}
-                      onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
-                      onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-                      onEnded={() => setPlaying(false)}
-                    />
-                  </ScreenStage>
-                  <div className="flex items-center gap-3">
-                    <Button size="icon-sm" variant="ghost" onClick={togglePlay} aria-label={playing ? '暂停' : '播放'}>
-                      {playing ? <PauseIcon /> : <PlayIcon />}
-                    </Button>
-                    <span className="w-10 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
-                      {formatClock(time)}
-                    </span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={duration || 0}
-                      step={0.1}
-                      value={Math.min(time, duration || 0)}
-                      onChange={(e) => {
-                        const video = videoRef.current;
-                        if (!video) return;
-                        video.currentTime = Number(e.target.value);
-                        setTime(video.currentTime);
-                      }}
-                      className="h-1 min-w-0 flex-1 accent-foreground"
-                      aria-label="录像进度"
-                    />
-                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
-                      {formatClock(duration)}
-                    </span>
-                  </div>
-                </>
-              ) : (
-                <Empty>
-                  <EmptyHeader>
-                    <EmptyTitle>还没有录像</EmptyTitle>
-                    <EmptyDescription>
-                      会话还在启动（录屏从「窗口铺满 + 应用可操作」那一刻才开始），或启动阶段就失败了。
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              )}
-            </CardContent>
-          </Card>
+      <section className="flex flex-col gap-1">
+        <h2 className="text-sm font-medium">验收过程</h2>
+        <p className="text-xs text-muted-foreground">
+          按发生顺序排列。▶ 是这一步前后 4 秒的画面，完整录像在页面最下面的附录里。
+        </p>
+      </section>
 
-          {screenshots.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>截图证据</CardTitle>
-                <CardDescription>点一张跳到录像里的对应时刻。</CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-2 gap-2 md:grid-cols-3">
-                {screenshots.map((e) => (
-                  <button
-                    key={e.seq}
-                    onClick={() => seek(e)}
-                    className="group overflow-hidden rounded-md border text-left transition hover:bg-muted"
-                  >
-                    <img
-                      src={`/api/sessions/${session.id}/artifacts/${e.artifact!.split('/').pop()}`}
-                      alt={e.artifact}
-                      // contain 而不是 cover：截图尺寸跟着窗口走，cover 会按缩略图框裁掉边缘
-                      className="aspect-video w-full bg-neutral-950 object-contain"
-                    />
-                    <div className="truncate px-2 py-1 text-xs text-muted-foreground">{e.artifact}</div>
-                  </button>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-        </div>
+      {events.length === 0 ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>还没有任何操作</EmptyTitle>
+            <EmptyDescription>模型还没对这台机器做任何操作。</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <ol className="flex flex-col">
+          {events.map((event, index) => (
+            <StepRow key={event.seq} sessionId={session.id} event={event} gapMs={gapBefore(events, index)} />
+          ))}
+        </ol>
+      )}
 
-        <div className="flex min-w-0 flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>操作时间线</CardTitle>
-              <CardDescription>点一步跳一段录像。</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {events.length === 0 ? (
-                <Empty>
-                  <EmptyHeader>
-                    <EmptyTitle>还没有工具调用</EmptyTitle>
-                    <EmptyDescription>模型还没对这台机器做任何操作。</EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              ) : (
-                <ScrollArea className="max-h-[420px]">
-                  <ol className="flex flex-col gap-1 pr-3">
-                    {events.map((e) => (
-                      <li key={e.seq}>
-                        <button
-                          onClick={() => seek(e)}
-                          className={`w-full rounded-md border px-3 py-2 text-left text-xs transition hover:bg-muted ${
-                            selected === e.seq ? 'border-ring bg-muted' : 'border-border'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="font-medium">{e.tool}</span>
-                            <span className={e.ok ? 'text-muted-foreground' : 'text-destructive'}>
-                              {e.videoOffsetMs >= 0 ? `${(e.videoOffsetMs / 1000).toFixed(1)}s` : '—'}
-                            </span>
-                          </div>
-                          <div className="mt-1 truncate text-muted-foreground">{e.result || '(无结果文本)'}</div>
-                        </button>
-                      </li>
-                    ))}
-                  </ol>
-                </ScrollArea>
-              )}
-            </CardContent>
-          </Card>
-
+      <details className="rounded-lg border" open={events.length === 0}>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium select-none">
+          附录：完整录像与日志
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            {session.hasVideo ? '整段录像（含模型的思考空窗）' : '还没有录像'}
+          </span>
+        </summary>
+        <div className="flex flex-col gap-4 border-t p-4">
+          <VideoAppendix session={session} />
           <LogPanel sessionId={session.id} />
         </div>
-      </div>
+      </details>
     </div>
   );
 }
 
-/** 录像里显示的秒数：m:ss，超过一小时才是 h:mm:ss */
-function formatClock(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-  const total = Math.floor(seconds);
-  const s = String(total % 60).padStart(2, '0');
-  const m = Math.floor(total / 60) % 60;
-  const h = Math.floor(total / 3600);
-  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+/**
+ * 一步：序号 + 描述 + 意图/期望 + 结果 + 画面。
+ *
+ * 断言步和动作步用不同的左边框颜色区分——看一眼就知道哪几条是「结论」。
+ */
+function StepRow({ sessionId, event, gapMs }: { sessionId: string; event: SessionEvent; gapMs: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
+  const isAssert = event.kind === 'assert';
+  const failed = !event.ok;
+
+  return (
+    <>
+      {gapMs >= 15000 && (
+        // 空窗不删掉，而是标出来：模型在这段时间里没操作屏幕，但它在思考。
+        <li className="ml-4 flex items-center gap-2 border-l border-dashed py-1 pl-4 text-xs text-muted-foreground">
+          <span className="size-1 rounded-full bg-muted-foreground/50" />
+          这之间 {formatClock(gapMs / 1000)} 没有操作（模型在思考）
+        </li>
+      )}
+      <li className="flex gap-3 pb-3">
+        <div className="flex w-6 shrink-0 flex-col items-center pt-2">
+          <span
+            className={`flex size-6 items-center justify-center rounded-full border font-mono text-[11px] ${
+              failed ? 'border-destructive text-destructive' : 'text-muted-foreground'
+            }`}
+          >
+            {event.seq}
+          </span>
+          <span className="mt-1 w-px flex-1 bg-border" />
+        </div>
+
+        <div
+          className={`min-w-0 flex-1 rounded-lg border p-3 ${
+            failed ? 'border-destructive/40 bg-destructive/5' : isAssert ? 'bg-muted/40' : ''
+          }`}
+        >
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <div className="flex min-w-0 items-baseline gap-2">
+              <span className="text-sm font-medium">{event.caption || event.tool}</span>
+              {isAssert && (
+                <Badge variant={event.ok ? 'success' : 'destructive'}>
+                  {event.ok ? (
+                    <>
+                      <CheckIcon data-icon="inline-start" />
+                      成立
+                    </>
+                  ) : (
+                    <>
+                      <XIcon data-icon="inline-start" />
+                      不成立
+                    </>
+                  )}
+                </Badge>
+              )}
+            </div>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-mono">{event.videoOffsetMs >= 0 ? formatClock(event.videoOffsetMs / 1000) : '—'}</span>
+              {event.clip && (
+                <Button variant="ghost" size="xs" onClick={() => setExpanded((v) => !v)}>
+                  {expanded ? <PauseIcon data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}
+                  {expanded ? '收起' : '看这 4 秒'}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {event.intent && <p className="mt-1 text-xs text-muted-foreground">意图：{event.intent}</p>}
+          {event.expect && <p className="mt-0.5 text-xs text-muted-foreground">期望：{event.expect}</p>}
+
+          {event.result && (
+            <div className="mt-1">
+              <p
+                className={`text-xs break-words ${event.result.length > 200 && !resultOpen ? 'line-clamp-2' : ''} ${
+                  failed ? 'text-destructive' : 'text-muted-foreground'
+                }`}
+              >
+                {isAssert ? `证据：${event.result.replace(/^断言(不?)成立：/, '')}` : event.result}
+              </p>
+              {event.result.length > 200 && (
+                <button
+                  onClick={() => setResultOpen((v) => !v)}
+                  className="text-[11px] text-muted-foreground underline-offset-2 hover:underline"
+                >
+                  {resultOpen ? '收起结果' : `展开完整结果（${event.result.length} 字）`}
+                </button>
+              )}
+            </div>
+          )}
+
+          {expanded && event.clip && (
+            <video
+              autoPlay
+              controls
+              preload="none"
+              src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
+              className="mt-2 w-full rounded-md bg-neutral-950"
+            />
+          )}
+
+          {event.shot && !expanded && (
+            // 缩略图按原始比例给高上限，不拉伸：报告里一屏能扫到几步
+            <button
+              onClick={() => setExpanded(true)}
+              className="mt-2 block w-fit max-w-full cursor-zoom-in overflow-hidden rounded-md border bg-neutral-950"
+              title="点开看这 4 秒"
+            >
+              <img
+                src={`/api/sessions/${sessionId}/artifacts/${event.shot}`}
+                alt={event.caption}
+                loading="lazy"
+                className="block max-h-[280px] w-auto max-w-full"
+              />
+            </button>
+          )}
+
+          {!event.shot && event.artifact && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              附件：{event.artifact}（{event.ok ? '已落盘' : '未生成'}）
+            </p>
+          )}
+        </div>
+      </li>
+    </>
+  );
+}
+
+/** 完整录像：报告里是附录，不是主入口 */
+function VideoAppendix({ session }: { session: Session }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  if (!session.hasVideo) {
+    return (
+      <Empty>
+        <EmptyHeader>
+          <EmptyTitle>还没有录像</EmptyTitle>
+          <EmptyDescription>会话还在启动，或启动阶段就失败了。</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  const toggle = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => undefined);
+    else video.pause();
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <ScreenStage frame={session.frame} display={session.display}>
+        <video
+          ref={videoRef}
+          preload="metadata"
+          poster={`/api/sessions/${session.id}/poster`}
+          src={`/api/sessions/${session.id}/video`}
+          className="size-full"
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
+          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+          onEnded={() => setPlaying(false)}
+        />
+      </ScreenStage>
+      <div className="flex items-center gap-3">
+        <Button size="icon-sm" variant="ghost" onClick={toggle} aria-label={playing ? '暂停' : '播放'}>
+          {playing ? <PauseIcon /> : <PlayIcon />}
+        </Button>
+        <span className="w-10 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+          {formatClock(time)}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={duration || 0}
+          step={0.1}
+          value={Math.min(time, duration || 0)}
+          onChange={(e) => {
+            const video = videoRef.current;
+            if (!video) return;
+            video.currentTime = Number(e.target.value);
+            setTime(video.currentTime);
+          }}
+          className="h-1 min-w-0 flex-1 accent-foreground"
+          aria-label="录像进度"
+        />
+        <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">{formatClock(duration)}</span>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -328,7 +400,11 @@ function LogPanel({ sessionId }: { sessionId: string }) {
       <CardHeader>
         <CardTitle>日志</CardTitle>
         <CardAction>
-          <Button variant="ghost" size="xs" render={<a href={`/api/sessions/${sessionId}/logs/${active}`} target="_blank" rel="noreferrer" />}>
+          <Button
+            variant="ghost"
+            size="xs"
+            render={<a href={`/api/sessions/${sessionId}/logs/${active}`} target="_blank" rel="noreferrer" />}
+          >
             全文
             <ExternalLinkIcon data-icon="inline-end" />
           </Button>
@@ -352,6 +428,25 @@ function LogPanel({ sessionId }: { sessionId: string }) {
       </CardContent>
     </Card>
   );
+}
+
+/** 与上一步之间的空窗（毫秒）：报告的节奏靠它，不靠录像 */
+function gapBefore(events: SessionEvent[], index: number): number {
+  // 第一步之前不标空窗：那段是启动 + 模型第一次思考，没有参照点
+  if (index === 0) return 0;
+  const prev = new Date(events[index - 1].at).getTime();
+  const cur = new Date(events[index].at).getTime();
+  return Math.max(0, cur - prev);
+}
+
+/** 秒数 → m:ss */
+function formatClock(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const s = String(total % 60).padStart(2, '0');
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
 /**

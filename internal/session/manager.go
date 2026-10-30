@@ -459,10 +459,11 @@ func (m *Manager) inspector(ctx context.Context, id string) (Inspector, error) {
 // Record 执行一次工具调用并写审计：参数、结果摘要、耗时、在录像里的偏移量。
 //
 // 所有对外动作都必须走这里，否则审计会出现空洞——那正是这个项目最不能接受的。
-func (m *Manager) Record(ctx context.Context, id, tool string, args any, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (string, string, error) {
+func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (string, string, error) {
 	insp, err := m.inspector(ctx, id)
 	if err != nil {
-		m.writeEvent(ctx, id, tool, args, err.Error(), "", 0, false, -1)
+		step.Caption = captionFor(step, nil)
+		m.writeEvent(ctx, id, step, err.Error(), "", 0, false, -1)
 		return "", "", err
 	}
 
@@ -497,7 +498,19 @@ func (m *Manager) Record(ctx context.Context, id, tool string, args any, fn func
 	if callErr != nil {
 		msg = callErr.Error()
 	}
-	m.writeEvent(ctx, id, tool, args, msg, artifact, duration.Milliseconds(), callErr == nil, offset)
+
+	// 画面在动作之后截：要拍到的是「动作的结果」，不是动作之前的样子。
+	if step.Caption == "" {
+		step.Caption = captionFor(step, describe(insp, step))
+	}
+	if sess, err := m.Get(ctx, id); err == nil && sess.Dir != "" {
+		step.Shot = m.captureShot(ctx, sess.Dir, insp, step)
+	}
+	ok := callErr == nil
+	if step.Passed != nil {
+		ok = *step.Passed
+	}
+	m.writeEvent(ctx, id, step, msg, artifact, duration.Milliseconds(), ok, offset)
 
 	if callErr != nil {
 		return "", artifact, callErr
@@ -505,17 +518,27 @@ func (m *Manager) Record(ctx context.Context, id, tool string, args any, fn func
 	return result, artifact, nil
 }
 
-func (m *Manager) writeEvent(ctx context.Context, id, tool string, args any, result, artifact string, durationMS int64, ok bool, offset int64) {
-	rawArgs, err := json.Marshal(args)
+func (m *Manager) writeEvent(ctx context.Context, id string, step Step, result, artifact string, durationMS int64, ok bool, offset int64) {
+	rawArgs, err := json.Marshal(step.Args)
 	if err != nil {
 		rawArgs = []byte(`{}`)
 	}
+	kind := step.Kind
+	if kind == "" {
+		kind = "action"
+	}
+	caption := step.Caption
+	if caption == "" {
+		caption = captionFor(step, nil)
+	}
 	// 审计是旁路：写失败只告警，不影响工具本身的成败
 	if _, err := m.store.AppendEvent(ctx, store.Event{
-		SessionID: id, At: time.Now(), Tool: tool, Args: rawArgs, OK: ok,
-		DurationMS: durationMS, VideoOffsetMS: offset, Result: truncate(result, 2000), ArtifactPath: artifact,
+		SessionID: id, At: time.Now(), Tool: step.Tool, Args: rawArgs, OK: ok, Kind: kind,
+		Caption: caption, Intent: step.Intent, Expect: step.Expect,
+		DurationMS: durationMS, VideoOffsetMS: offset, Result: truncate(result, 2000),
+		ArtifactPath: artifact, Shot: step.Shot,
 	}); err != nil {
-		m.log.Error("写审计事件失败", "session", id, "tool", tool, "err", err)
+		m.log.Error("写审计事件失败", "session", id, "tool", step.Tool, "err", err)
 	}
 }
 

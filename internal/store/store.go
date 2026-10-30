@@ -93,17 +93,26 @@ type Session struct {
 
 // Event 一次工具调用（审计记录的最小单元）。
 type Event struct {
-	ID            int64
-	SessionID     string
-	Seq           int
-	At            time.Time
-	Tool          string
-	Args          json.RawMessage
-	OK            bool
+	ID        int64
+	SessionID string
+	Seq       int
+	At        time.Time
+	Tool      string
+	Args      json.RawMessage
+	OK        bool
+	// Kind 这一步的性质：action（做了件事）/ assert（断言）/ note（只写说明）。
+	Kind string
+	// Caption 动作的人话描述，从可访问性树自动生成（点击「保存」按钮）。
+	Caption string
+	// Intent 为什么做这一步；Expect 期望看到什么。都由调用方给，可空。
+	Intent        string
+	Expect        string
 	DurationMS    int64
 	VideoOffsetMS int64
 	Result        string
 	ArtifactPath  string
+	// Shot 这一步的画面（相对会话目录）；失败也截，报告里最有用的就是失败那张。
+	Shot string
 }
 
 // Artifact 会话产物（截图/录像/报告）。
@@ -375,11 +384,15 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 	if e.OK {
 		ok = 1
 	}
+	if e.Kind == "" {
+		e.Kind = "action"
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events
-		(session_id, seq, at, tool, args, ok, duration_ms, video_offset_ms, result, artifact_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(session_id, seq, at, tool, args, ok, kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, seq, e.At.UTC().Format(time.RFC3339Nano), e.Tool, args, ok,
-		e.DurationMS, e.VideoOffsetMS, e.Result, e.ArtifactPath); err != nil {
+		e.Kind, e.Caption, e.Intent, e.Expect,
+		e.DurationMS, e.VideoOffsetMS, e.Result, e.ArtifactPath, e.Shot); err != nil {
 		return 0, fmt.Errorf("写入事件失败: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -391,7 +404,8 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 // ListEvents 返回会话的全部事件，按 seq 升序。
 func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, seq, at, tool, args, ok,
-		duration_ms, video_offset_ms, result, artifact_path FROM events WHERE session_id = ? ORDER BY seq`, sessionID)
+		kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot
+		FROM events WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("查询事件失败: %w", err)
 	}
@@ -406,7 +420,8 @@ func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, erro
 			ok   int
 		)
 		if err := rows.Scan(&e.ID, &e.SessionID, &e.Seq, &at, &e.Tool, &args, &ok,
-			&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath); err != nil {
+			&e.Kind, &e.Caption, &e.Intent, &e.Expect,
+			&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath, &e.Shot); err != nil {
 			return nil, fmt.Errorf("扫描事件失败: %w", err)
 		}
 		e.Args = json.RawMessage(args)

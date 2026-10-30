@@ -55,7 +55,7 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 	}
 
 	want := []string{
-		"click", "end_session", "eval", "fill", "list_sessions",
+		"assert", "click", "end_session", "eval", "fill", "list_sessions",
 		"press_key", "screenshot", "snapshot", "start_session",
 	}
 	if len(got) != len(want) {

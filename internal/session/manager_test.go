@@ -20,12 +20,12 @@ import (
 
 // fakeDocker 记录调度器对容器做了什么，避免测试依赖真实 docker。
 type fakeDocker struct {
-	mu          sync.Mutex
-	runSpecs    []dockerx.Spec
-	stopped     []string
-	execOutput  string
-	runErr      error
-	stopErr     error
+	mu         sync.Mutex
+	runSpecs   []dockerx.Spec
+	stopped    []string
+	execOutput string
+	runErr     error
+	stopErr    error
 }
 
 func (f *fakeDocker) Run(_ context.Context, spec dockerx.Spec) (string, error) {
@@ -60,7 +60,7 @@ func (f *fakeDocker) Stats(context.Context, string) (dockerx.Stats, error) {
 }
 
 func (f *fakeDocker) Logs(context.Context, string, int) (string, error) { return "app log line\n", nil }
-func (f *fakeDocker) Remove(context.Context, string) error            { return nil }
+func (f *fakeDocker) Remove(context.Context, string) error              { return nil }
 
 // fakeInspector 模拟页面：快照固定返回两个元素，点击/输入只记录调用。
 type fakeInspector struct {
@@ -227,7 +227,7 @@ func TestRecordWritesAuditWithVideoOffset(t *testing.T) {
 	m.live[sess.ID].recordingStartMs = time.Now().UnixMilli()
 	m.mu.Unlock()
 
-	if _, _, err := m.Record(ctx, sess.ID, "click", map[string]any{"ref": "e1"},
+	if _, _, err := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e1"}},
 		func(ctx context.Context, i Inspector) (string, string, error) {
 			return "clicked e1", "", i.Click(ctx, "e1")
 		}); err != nil {
@@ -261,7 +261,7 @@ func TestRecordLogsFailedToolCall(t *testing.T) {
 		t.Fatalf("起会话失败: %v", err)
 	}
 
-	_, _, callErr := m.Record(ctx, sess.ID, "click", map[string]any{"ref": "e404"},
+	_, _, callErr := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e404"}},
 		func(context.Context, Inspector) (string, string, error) {
 			return "", "", errors.New("元素引用已失效")
 		})

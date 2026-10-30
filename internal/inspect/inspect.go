@@ -253,3 +253,66 @@ func Summarize(s Snapshot) string {
 	b.WriteString(s.Text)
 	return b.String()
 }
+
+// StepJPEG 截「这一步」的画面：先把元素框高亮出来再截，截图完成立刻撤掉高亮。
+//
+// 这就是 Steps Recorder 那个红圈的作用——报告里一眼看出这一步点的是哪儿，
+// 而不是让人对着整屏截图自己找。宽度压到 960：报告里显示得够清楚，
+// 体积只有全尺寸 PNG 的六分之一左右。
+func (c *Client) StepJPEG(ctx context.Context, path, ref string) (int64, error) {
+	if ref != "" {
+		if el, err := c.Resolve(ref); err == nil {
+			if _, err := c.cdp.Evaluate(ctx, highlightScript(el)); err == nil {
+				// 等一帧再截：刚插入的覆盖层可能还没合成，截出来会缺框
+				time.Sleep(80 * time.Millisecond)
+			}
+			defer func() { _, _ = c.cdp.Evaluate(context.WithoutCancel(ctx), clearHighlightScript) }()
+		}
+	}
+
+	data, err := c.cdp.ScreenshotJPEGScaled(ctx, 85, 960)
+	if err != nil {
+		return 0, err
+	}
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return 0, fmt.Errorf("解码步骤截图失败: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return 0, fmt.Errorf("创建步骤截图目录失败: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return 0, fmt.Errorf("写入步骤截图失败: %w", err)
+	}
+	return int64(len(raw)), nil
+}
+
+// Describe 取引用对应的元素（给这一步自动写一句人话用）。
+func (c *Client) Describe(ref string) (Element, bool) {
+	el, ok := c.refs[ref]
+	return el, ok
+}
+
+func highlightScript(el Element) string {
+	x, y, w, h := el.Box[0], el.Box[1], el.Box[2], el.Box[3]
+	return fmt.Sprintf(`(() => {
+  const old = document.getElementById('__rigd_hl');
+  if (old) old.remove();
+  const d = document.createElement('div');
+  d.id = '__rigd_hl';
+  Object.assign(d.style, {
+    position: 'fixed', left: '%dpx', top: '%dpx', width: '%dpx', height: '%dpx',
+    border: '2px solid #ef4444', borderRadius: '6px',
+    boxShadow: '0 0 0 3px rgba(239,68,68,0.25)',
+    zIndex: 2147483647, pointerEvents: 'none',
+  });
+  document.body.appendChild(d);
+  return true;
+})()`, x, y, w, h)
+}
+
+const clearHighlightScript = `(() => {
+  const old = document.getElementById('__rigd_hl');
+  if (old) old.remove();
+  return true;
+})()`

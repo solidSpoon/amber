@@ -40,16 +40,30 @@ export interface LogSource {
   bytes: number;
 }
 
+export type EventKind = 'action' | 'assert' | 'note';
+
 export interface SessionEvent {
   seq: number;
   at: string;
   tool: string;
   args: unknown;
   ok: boolean;
+  /** 这一步的性质：做了什么 / 断言了什么 */
+  kind: EventKind;
+  /** 人话描述，后端按动作 + 元素名自动生成 */
+  caption: string;
+  /** 为什么做这一步（调用方给，可空） */
+  intent?: string;
+  /** 期望看到什么（调用方给，可空） */
+  expect?: string;
   durationMs: number;
   videoOffsetMs: number;
   result: string;
   artifact?: string;
+  /** 这一步的画面，如 shots/150405.123-click.jpg */
+  shot?: string;
+  /** 有没有可点的 4 秒短片 */
+  clip: boolean;
 }
 
 /** 看板上的一台机器（一个固定槽位） */

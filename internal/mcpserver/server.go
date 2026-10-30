@@ -45,6 +45,7 @@ func NewServer(mgr *session.Manager, log *slog.Logger) *mcp.Server {
 
 	registerSessionTools(server, s)
 	registerActionTools(server, s)
+	registerAssertTool(server, s)
 	return server
 }
 
@@ -108,12 +109,13 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 			SessionID:     sess.ID,
 			Status:        string(sess.Status),
 			Verdict:       sess.Verdict,
+			ReportURL:     fmt.Sprintf("/#/sessions/%s", sess.ID),
 			VideoURL:      fmt.Sprintf("/api/sessions/%s/video", sess.ID),
 			DurationMS:    sess.VideoDurationMS,
 			ReportSummary: sess.Summary,
 		}
-		return text(fmt.Sprintf("会话已收尾：%s（%s，录像 %.1fs）",
-			sess.ID, sess.Status, float64(sess.VideoDurationMS)/1000)), out, nil
+		return text(fmt.Sprintf("会话已收尾：%s（%s，录像 %.1fs）。验收报告：%s",
+			sess.ID, sess.Status, float64(sess.VideoDurationMS)/1000, out.ReportURL)), out, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -148,9 +150,11 @@ type endArgs struct {
 }
 
 type endResult struct {
-	SessionID     string `json:"sessionId"`
-	Status        string `json:"status"`
-	Verdict       string `json:"verdict,omitempty"`
+	SessionID string `json:"sessionId"`
+	Status    string `json:"status"`
+	Verdict   string `json:"verdict,omitempty"`
+	// ReportURL 验收报告（步骤 + 每步画面 + 断言），提 PR 时贴这个
+	ReportURL     string `json:"reportUrl"`
 	VideoURL      string `json:"videoUrl"`
 	DurationMS    int64  `json:"durationMs"`
 	ReportSummary string `json:"summary,omitempty"`
@@ -173,6 +177,13 @@ type listItem struct {
 
 type sessionArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
+	stepArgs
+}
+
+// stepArgs 报告层的可选字段。填了报告才读得懂；不填也不影响执行。
+type stepArgs struct {
+	Intent string `json:"intent,omitempty" jsonschema:"这一步为什么做（一句人话，会写进验收报告）"`
+	Expect string `json:"expect,omitempty" jsonschema:"期望看到什么（会写进报告，方便对照实际结果）"`
 }
 
 func registerActionTools(server *mcp.Server, s *Server) {
@@ -182,7 +193,9 @@ func registerActionTools(server *mcp.Server, s *Server) {
 			"先用它确定目标，再用引用号点击，不要靠猜坐标。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sessionArgs) (*mcp.CallToolResult, snapshotResult, error) {
 		var snap inspect.Snapshot
-		_, _, err := s.manager.Record(ctx, args.SessionID, "snapshot", map[string]any{}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
+		_, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
+			Tool: "snapshot", Args: map[string]any{}, Intent: args.Intent, Expect: args.Expect,
+		}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
 			got, err := insp.Snapshot(ctx)
 			if err != nil {
 				return "", "", err
@@ -207,7 +220,9 @@ func registerActionTools(server *mcp.Server, s *Server) {
 
 		var path string
 		var size int64
-		_, artifact, err := s.manager.Record(ctx, args.SessionID, "screenshot", map[string]any{"label": args.Label},
+		_, artifact, err := s.manager.Record(ctx, args.SessionID, session.Step{
+			Tool: "screenshot", Args: map[string]any{"label": args.Label}, Intent: args.Intent, Expect: args.Expect,
+		},
 			func(ctx context.Context, insp session.Inspector) (string, string, error) {
 				dir, err := s.sessionDir(ctx, args.SessionID)
 				if err != nil {
@@ -244,8 +259,10 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		if args.Ref == "" && (args.X == 0 && args.Y == 0) {
 			return nil, actionResult{}, errors.New("ref 与 x/y 至少要给一个")
 		}
-		msg, _, err := s.manager.Record(ctx, args.SessionID, "click",
-			map[string]any{"ref": args.Ref, "x": args.X, "y": args.Y},
+		msg, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
+			Tool: "click", Args: map[string]any{"ref": args.Ref, "x": args.X, "y": args.Y},
+			Intent: args.Intent, Expect: args.Expect, ShotRef: args.Ref,
+		},
 			func(ctx context.Context, insp session.Inspector) (string, string, error) {
 				if args.Ref != "" {
 					if err := insp.Click(ctx, args.Ref); err != nil {
@@ -268,8 +285,10 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "fill",
 		Description: "往输入框填文本（覆盖原内容）。submit=true 时按回车提交。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args fillArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, _, err := s.manager.Record(ctx, args.SessionID, "fill",
-			map[string]any{"ref": args.Ref, "text": args.Text, "submit": args.Submit},
+		msg, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
+			Tool: "fill", Args: map[string]any{"ref": args.Ref, "text": args.Text, "submit": args.Submit},
+			Intent: args.Intent, Expect: args.Expect, ShotRef: args.Ref,
+		},
 			func(ctx context.Context, insp session.Inspector) (string, string, error) {
 				if err := insp.Fill(ctx, args.Ref, args.Text); err != nil {
 					return "", "", err
@@ -291,7 +310,9 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "press_key",
 		Description: "给当前焦点发按键：Enter / Escape / Space / ArrowRight / ArrowLeft 等。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args pressArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, _, err := s.manager.Record(ctx, args.SessionID, "press_key", map[string]any{"key": args.Key},
+		msg, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
+			Tool: "press_key", Args: map[string]any{"key": args.Key}, Intent: args.Intent, Expect: args.Expect,
+		},
 			func(ctx context.Context, insp session.Inspector) (string, string, error) {
 				if err := insp.Press(ctx, args.Key); err != nil {
 					return "", "", err
@@ -309,7 +330,9 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Description: "在页面里执行只读 JS 并返回结果，用于精确断言（如读 video.currentTime）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args evalArgs) (*mcp.CallToolResult, evalResult, error) {
 		var out any
-		_, _, err := s.manager.Record(ctx, args.SessionID, "eval", map[string]any{"script": args.Script},
+		_, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
+			Tool: "eval", Args: map[string]any{"script": args.Script}, Intent: args.Intent, Expect: args.Expect,
+		},
 			func(ctx context.Context, insp session.Inspector) (string, string, error) {
 				raw, err := insp.Evaluate(ctx, args.Script)
 				if err != nil {
@@ -329,9 +352,30 @@ func registerActionTools(server *mcp.Server, s *Server) {
 	})
 }
 
+func registerAssertTool(server *mcp.Server, s *Server) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "assert",
+		Description: "记录一条断言，报告里显示为 ✅/❌。把「你判断的」和「客观证据」分开写：" +
+			"claim 是判断，evidence 是支撑它的数值/文本。这一步同时会截一张图。",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args assertArgs) (*mcp.CallToolResult, actionResult, error) {
+		if strings.TrimSpace(args.Claim) == "" {
+			return nil, actionResult{}, errors.New("claim 不能为空")
+		}
+		if err := s.manager.Assert(ctx, args.SessionID, args.Claim, args.OK, args.Evidence); err != nil {
+			return nil, actionResult{}, err
+		}
+		label := "断言已记录 ✅"
+		if !args.OK {
+			label = "断言已记录 ❌"
+		}
+		return text(label + "：" + args.Claim), actionResult{OK: args.OK, Message: label}, nil
+	})
+}
+
 type screenshotArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
-	Label     string `json:"label" jsonschema:"本次截图的用途"`
+	stepArgs
+	Label string `json:"label" jsonschema:"本次截图的用途"`
 }
 
 type screenshotResult struct {
@@ -340,27 +384,38 @@ type screenshotResult struct {
 }
 
 type clickArgs struct {
-	SessionID string  `json:"sessionId" jsonschema:"会话 ID"`
-	Ref       string  `json:"ref,omitempty" jsonschema:"元素引用号，如 e3"`
-	X         float64 `json:"x,omitempty" jsonschema:"页面坐标 X（兜底方案）"`
-	Y         float64 `json:"y,omitempty" jsonschema:"页面坐标 Y（兜底方案）"`
+	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
+	stepArgs
+	Ref string  `json:"ref,omitempty" jsonschema:"元素引用号，如 e3"`
+	X   float64 `json:"x,omitempty" jsonschema:"页面坐标 X（兜底方案）"`
+	Y   float64 `json:"y,omitempty" jsonschema:"页面坐标 Y（兜底方案）"`
 }
 
 type fillArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
-	Ref       string `json:"ref" jsonschema:"元素引用号"`
-	Text      string `json:"text" jsonschema:"要输入的文字"`
-	Submit    bool   `json:"submit,omitempty" jsonschema:"是否回车提交"`
+	stepArgs
+	Ref    string `json:"ref" jsonschema:"元素引用号"`
+	Text   string `json:"text" jsonschema:"要输入的文字"`
+	Submit bool   `json:"submit,omitempty" jsonschema:"是否回车提交"`
 }
 
 type pressArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
-	Key       string `json:"key" jsonschema:"按键名"`
+	stepArgs
+	Key string `json:"key" jsonschema:"按键名"`
 }
 
 type evalArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
-	Script    string `json:"script" jsonschema:"JS 表达式"`
+	stepArgs
+	Script string `json:"script" jsonschema:"JS 表达式"`
+}
+
+type assertArgs struct {
+	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
+	Claim     string `json:"claim" jsonschema:"断言内容：一句能被验证的话，例如「字幕在 12.5s 出现」"`
+	OK        bool   `json:"ok" jsonschema:"断言是否成立"`
+	Evidence  string `json:"evidence,omitempty" jsonschema:"证据：DOM 片段、数值、日志行。会原样进报告，供人复核"`
 }
 
 type actionResult struct {

@@ -106,7 +106,10 @@ func (s *Server) Handler() http.Handler {
 		api.Post("/sessions/{id}/press", s.actionPress)
 		api.Get("/sessions/{id}/video", s.serveVideo)
 		api.Get("/sessions/{id}/poster", s.servePoster)
-		api.Get("/sessions/{id}/artifacts/{name}", s.serveArtifact)
+		api.Get("/sessions/{id}/events/{seq}/clip", s.serveClip)
+		api.Post("/sessions/{id}/assert", s.actionAssert)
+		// 用通配符而不是单段参数：产物路径带目录（shots/x.jpg、screenshots/x.png）
+		api.Get("/sessions/{id}/artifacts/*", s.serveArtifact)
 		api.Get("/sessions/stream", s.streamSessions)
 		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
 		api.Get("/apps", s.apps)
@@ -291,10 +294,17 @@ type eventDTO struct {
 	Tool          string          `json:"tool"`
 	Args          json.RawMessage `json:"args"`
 	OK            bool            `json:"ok"`
+	Kind          string          `json:"kind"`
+	Caption       string          `json:"caption"`
+	Intent        string          `json:"intent,omitempty"`
+	Expect        string          `json:"expect,omitempty"`
 	DurationMS    int64           `json:"durationMs"`
 	VideoOffsetMS int64           `json:"videoOffsetMs"`
 	Result        string          `json:"result"`
 	Artifact      string          `json:"artifact,omitempty"`
+	// Shot 这一步的画面；Clip 表示有没有可点的 4 秒短片
+	Shot string `json:"shot,omitempty"`
+	Clip bool   `json:"clip"`
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -303,12 +313,16 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	sess, _ := s.manager.Get(r.Context(), chi.URLParam(r, "id"))
+	hasVideo := sess.VideoPath != ""
 	out := make([]eventDTO, 0, len(events))
 	for _, e := range events {
 		out = append(out, eventDTO{
 			Seq: e.Seq, At: e.At.UTC().Format(time.RFC3339Nano), Tool: e.Tool, Args: e.Args,
-			OK: e.OK, DurationMS: e.DurationMS, VideoOffsetMS: e.VideoOffsetMS,
-			Result: e.Result, Artifact: e.ArtifactPath,
+			OK: e.OK, Kind: e.Kind, Caption: e.Caption, Intent: e.Intent, Expect: e.Expect,
+			DurationMS: e.DurationMS, VideoOffsetMS: e.VideoOffsetMS,
+			Result: e.Result, Artifact: e.ArtifactPath, Shot: e.Shot,
+			Clip: e.VideoOffsetMS >= 0 && hasVideo,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
@@ -330,6 +344,23 @@ func (s *Server) serveVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, path)
+}
+
+// serveClip 某一步前后 4 秒的短片（懒切片，切过就缓存）。
+func (s *Server) serveClip(w http.ResponseWriter, r *http.Request) {
+	seq, err := strconv.Atoi(chi.URLParam(r, "seq"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("seq 必须是数字"))
+		return
+	}
+	path, err := s.manager.Clip(r.Context(), chi.URLParam(r, "id"), seq)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	// 切片一旦生成就不会变
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 	http.ServeFile(w, r, path)
 }
 
@@ -355,12 +386,18 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	name := chi.URLParam(r, "name")
-	if strings.Contains(name, "..") || strings.Contains(name, "/") {
-		writeError(w, http.StatusBadRequest, errors.New("非法文件名"))
+	// 路径形如 "screenshots/x.png" 或 "shots/x.jpg"；不带目录的按截图处理（老链接）。
+	// 只允许这两个目录 + 单层文件名，防止路径穿越。
+	name := strings.TrimPrefix(chi.URLParam(r, "*"), "/")
+	dir, file, hasDir := strings.Cut(name, "/")
+	if !hasDir {
+		dir, file = "screenshots", name
+	}
+	if (dir != "screenshots" && dir != "shots") || file == "" || strings.ContainsAny(file, "/\\") || strings.Contains(file, "..") {
+		writeError(w, http.StatusBadRequest, errors.New("非法产物路径"))
 		return
 	}
-	path := filepath.Join(sess.Dir, "screenshots", name)
+	path := filepath.Join(sess.Dir, dir, file)
 	if _, err := os.Stat(path); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
