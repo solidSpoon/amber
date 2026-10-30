@@ -62,9 +62,6 @@ type Manager struct {
 	mu   sync.Mutex
 	live map[string]*liveSession
 
-	// frameInflight 防止同一会话的画面几何被并发测量（前端会同时发好几个请求）。
-	frameInflight sync.Map // sessionID -> bool
-
 	statsMu    sync.Mutex
 	statsCache map[string]statsEntry
 }

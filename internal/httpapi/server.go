@@ -248,8 +248,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
-	// 旧录像没有几何元数据：这里顺手量一次并回填（只量一次，之后读库）
-	sess, err := s.manager.EnsureFrame(r.Context(), chi.URLParam(r, "id"))
+	sess, err := s.manager.Get(r.Context(), chi.URLParam(r, "id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return

@@ -50,7 +50,7 @@ v0（`electron-acceptance-rig`）把 agent 塞进了容器，能用，但代价�
 ```
 容器：启动应用 → 铺满虚拟屏（rig-fit-window）→ 按窗口取景开录（rig-record）
         ↓ logs/window.json（窗口矩形 + 虚拟屏尺寸）
-控制面：就绪时存进会话（frame / display）→ 旧录像首次打开时从像素里量一次并回填
+控制面：就绪时存进会话（frame / display）
         ↓ GET /api/sessions/{id} 带上 frame+display；/poster 给首帧静帧
 管理台：ScreenStage 按 frame/display 裁剪 → 黑底等比显示，不裁变形、不铺一张大空白
 ```
@@ -65,11 +65,11 @@ v0（`electron-acceptance-rig`）把 agent 塞进了容器，能用，但代价�
   控制面等这个文件，否则前端会拿到一个还没开始录的会话（偏移量全是 -1）。
 - **铺不满也要有兜底**：应用拒绝最大化时，`rig-record` 会退化成「只抓窗口那一块」，
   并把真实矩形写进 `window.json`；界面据 `frame != display` 裁剪并说明原因。
-- **旧录像不改文件**：裁剪是渲染层的变换（放大 `display/frame` 倍 + 平移），
-  录像本身一个字节不动，时间轴偏移量也不受影响。
+- **裁剪只是渲染层的变换**：放大 `display/frame` 倍 + 平移，录像本身一个字节不动，
+  时间轴偏移量也不受影响。
 
-控制面需要 `ffmpeg` / `ffprobe` 在 PATH 上：用来给旧录像量画面区域、给录像抽首帧封面。
-没有也能跑，只是旧会话会按整幅画面显示、录像卡片是黑屏封面。
+控制面需要 `ffmpeg` 在 PATH 上：只用来给录像抽首帧封面。没装也能跑，
+只是录像卡片在按下播放前是一块黑屏。
 
 ## 目录
 
