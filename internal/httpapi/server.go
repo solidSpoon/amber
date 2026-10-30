@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}/artifacts/{name}", s.serveArtifact)
 		api.Get("/sessions/stream", s.streamSessions)
 		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
+		api.Get("/apps", s.apps)
 		api.Get("/machines", s.machines)
 		api.Get("/info", s.info)
 		api.Get("/mcp", s.mcpInfo)
@@ -478,6 +479,21 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// apps 应用注册表：控制台据此渲染应用选择器，不在前端写死任何一个应用名。
+func (s *Server) apps(w http.ResponseWriter, _ *http.Request) {
+	entries := session.AppCatalog()
+	out := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, map[string]any{
+			"key":         entry.Key,
+			"name":        entry.Spec.Name,
+			"repo":        entry.Spec.Repo,
+			"description": entry.Spec.Description,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
 }
 
 // info 运行时信息：虚拟屏几何、并发上限等，看板据此画出与真实分辨率同比例的"显示器"。

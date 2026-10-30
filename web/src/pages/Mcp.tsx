@@ -1,4 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
+import { CopyIcon, EyeIcon, EyeOffIcon } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { PageHeader } from '@/components/page-header';
 
 interface ToolInfo {
   name: string;
@@ -15,6 +24,13 @@ interface McpInfo {
 }
 
 type Client = 'claude' | 'cursor' | 'vscode' | 'cli';
+
+const CLIENTS: { key: Client; label: string }[] = [
+  { key: 'claude', label: 'Claude Desktop' },
+  { key: 'cursor', label: 'Cursor' },
+  { key: 'vscode', label: 'VS Code' },
+  { key: 'cli', label: '命令行' },
+];
 
 /**
  * MCP 配置页：把「怎么连、能调什么」直接摆出来，配好就能用。
@@ -37,109 +53,126 @@ export default function Mcp() {
 
   const snippet = useMemo(() => (info ? buildSnippet(client, info) : ''), [client, info]);
 
-  if (error) return <p className="text-sm text-red-600">读取 MCP 配置失败：{error}</p>;
-  if (!info) return <p className="text-sm text-neutral-400">加载中…</p>;
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>读取 MCP 配置失败</AlertTitle>
+        <AlertDescription>{error}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (!info) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    );
+  }
 
   const masked = reveal ? info.token : `${info.token.slice(0, 8)}${'•'.repeat(20)}`;
 
   return (
-    <div className="max-w-4xl space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">MCP 接入</h1>
-        <p className="mt-1 text-sm text-neutral-500">
-          把验收能力交给任意支持 MCP 的 AI：模型和 key 留在你自己的客户端里，这里只提供机器与工具。
-        </p>
-      </header>
+    <div className="flex max-w-4xl flex-col gap-6">
+      <PageHeader
+        title="MCP 接入"
+        description="把验收能力交给任意支持 MCP 的 AI：模型和 key 留在你自己的客户端里，这里只提供机器与工具。"
+      />
 
-      <section className="space-y-3 rounded-xl border border-neutral-200 bg-white p-5">
-        <h2 className="text-sm font-medium text-neutral-900">连接地址</h2>
-        <Row label="HTTP 端点" value={info.httpUrl} />
-        <div className="flex items-center gap-2">
-          <span className="w-24 shrink-0 text-xs text-neutral-500">访问令牌</span>
-          <code className="min-w-0 flex-1 truncate rounded-md bg-neutral-50 px-2 py-1 font-mono text-xs text-neutral-700">
-            {masked}
-          </code>
-          <button onClick={() => setReveal(!reveal)} className="text-xs text-neutral-500 hover:text-neutral-900">
-            {reveal ? '隐藏' : '显示'}
-          </button>
-          <CopyButton text={info.token} />
-        </div>
-        <p className="pt-1 text-xs text-neutral-400">
-          本机（127.0.0.1）直连不需要令牌；局域网/跨机器必须带 <code className="font-mono">Authorization: Bearer &lt;令牌&gt;</code>。
-        </p>
-      </section>
-
-      <section className="space-y-3 rounded-xl border border-neutral-200 bg-white p-5">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-medium text-neutral-900">客户端配置</h2>
-          <div className="flex gap-1 rounded-lg bg-neutral-100 p-1">
-            {(
-              [
-                ['claude', 'Claude Desktop'],
-                ['cursor', 'Cursor'],
-                ['vscode', 'VS Code'],
-                ['cli', '命令行'],
-              ] as [Client, string][]
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setClient(key)}
-                className={`rounded-md px-2.5 py-1 text-xs transition ${
-                  client === key ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+      <Card>
+        <CardHeader>
+          <CardTitle>连接地址</CardTitle>
+          <CardDescription>本机直连免令牌；跨机器必须带 Bearer 令牌。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <Row label="HTTP 端点" value={info.httpUrl} />
+          <div className="flex items-center gap-2">
+            <span className="w-20 shrink-0 text-xs text-muted-foreground">访问令牌</span>
+            <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">{masked}</code>
+            <Button variant="ghost" size="xs" onClick={() => setReveal(!reveal)}>
+              {reveal ? <EyeOffIcon data-icon="inline-start" /> : <EyeIcon data-icon="inline-start" />}
+              {reveal ? '隐藏' : '显示'}
+            </Button>
+            <CopyButton text={info.token} label="复制" />
           </div>
-        </div>
-        <pre className="overflow-x-auto rounded-lg bg-neutral-950 p-3 text-xs leading-relaxed text-neutral-100">
-          {snippet}
-        </pre>
-        <div className="flex items-center justify-between text-xs text-neutral-400">
-          <span>{hintFor(client)}</span>
-          <CopyButton text={snippet} />
-        </div>
-      </section>
+        </CardContent>
+      </Card>
 
-      <section className="space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-sm font-medium text-neutral-900">提供的工具（{info.tools.length}）</h2>
-          <span className="text-xs text-neutral-400">清单来自服务自身 tools/list</span>
-        </div>
-        <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-          <table className="w-full text-sm">
-            <thead className="bg-neutral-50 text-left text-xs text-neutral-500">
-              <tr>
-                <th className="px-4 py-2 font-medium">工具</th>
-                <th className="px-4 py-2 font-medium">说明</th>
-                <th className="px-4 py-2 font-medium">必填参数</th>
-              </tr>
-            </thead>
-            <tbody>
-              {info.tools.map((tool) => (
-                <tr key={tool.name} className="border-t border-neutral-100 align-top">
-                  <td className="whitespace-nowrap px-4 py-2 font-mono text-xs text-neutral-900">{tool.name}</td>
-                  <td className="px-4 py-2 text-neutral-600">{tool.description}</td>
-                  <td className="whitespace-nowrap px-4 py-2 font-mono text-xs text-neutral-400">
-                    {(tool.required ?? []).join(', ') || '—'}
-                  </td>
-                </tr>
+      <Card>
+        <CardHeader>
+          <CardTitle>客户端配置</CardTitle>
+          <CardDescription>复制下面的片段到对应客户端的配置里，重启客户端生效。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Tabs value={client} onValueChange={(value) => setClient(String(value) as Client)}>
+            <TabsList>
+              {CLIENTS.map((item) => (
+                <TabsTrigger key={item.key} value={item.key}>
+                  {item.label}
+                </TabsTrigger>
               ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+            </TabsList>
+            {CLIENTS.map((item) => (
+              <TabsContent key={item.key} value={item.key}>
+                <pre className="overflow-x-auto rounded-md bg-neutral-950 p-3 text-xs leading-relaxed text-neutral-100">
+                  {snippet}
+                </pre>
+              </TabsContent>
+            ))}
+          </Tabs>
+          <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+            <span>{hintFor(client)}</span>
+            <CopyButton text={snippet} label="复制配置" />
+          </div>
+        </CardContent>
+      </Card>
 
-      <section className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-relaxed text-amber-800">
-        <div className="mb-1 font-medium">注意</div>
-        <ul className="list-disc space-y-1 pl-4">
-          <li>令牌能起容器、能操作被测应用，等同于这台机器的操作权：不要把它发到群里或写进仓库。</li>
-          <li>控制台本身没有登录态，只应在可信局域网内访问；对外暴露请走反向代理 + 认证。</li>
-          <li>同一台机器同时最多跑 <code className="font-mono">RIGD_MAX_SESSIONS</code>（默认 2）个会话，超出会直接拒绝。</li>
-          <li>会话闲置超过 <code className="font-mono">RIGD_IDLE_TIMEOUT</code>（默认 10 分钟）会被自动回收并归档录像。</li>
-        </ul>
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>提供的工具（{info.tools.length}）</CardTitle>
+          <CardDescription>清单来自服务自身 tools/list，不是手写文档。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>工具</TableHead>
+                {/* 说明是全表最长的一列，允许换行，否则会把"必填参数"挤出卡片 */}
+                <TableHead className="whitespace-normal">说明</TableHead>
+                <TableHead>必填参数</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {info.tools.map((tool) => (
+                <TableRow key={tool.name} className="align-top">
+                  <TableCell className="font-mono text-xs whitespace-nowrap">{tool.name}</TableCell>
+                  <TableCell className="whitespace-normal text-muted-foreground">{tool.description}</TableCell>
+                  <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
+                    {(tool.required ?? []).join(', ') || '—'}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <Alert>
+        <AlertTitle>注意</AlertTitle>
+        <AlertDescription>
+          <ul className="list-disc space-y-1 pl-4">
+            <li>令牌能起容器、能操作被测应用，等同于这台机器的操作权：不要发群里或写进仓库。</li>
+            <li>控制台本身没有登录态，只应在可信局域网内访问；对外暴露请走反向代理 + 认证。</li>
+            <li>
+              同一台机器同时最多跑 <code className="font-mono">RIGD_MAX_SESSIONS</code>（默认 2）个会话，超出直接拒绝。
+            </li>
+            <li>
+              会话闲置超过 <code className="font-mono">RIGD_IDLE_TIMEOUT</code>（默认 10 分钟）会被自动回收并归档录像。
+            </li>
+          </ul>
+        </AlertDescription>
+      </Alert>
     </div>
   );
 }
@@ -147,38 +180,38 @@ export default function Mcp() {
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="w-24 shrink-0 text-xs text-neutral-500">{label}</span>
-      <code className="min-w-0 flex-1 truncate rounded-md bg-neutral-50 px-2 py-1 font-mono text-xs text-neutral-700">
-        {value}
-      </code>
-      <CopyButton text={value} />
+      <span className="w-20 shrink-0 text-xs text-muted-foreground">{label}</span>
+      <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">{value}</code>
+      <CopyButton text={value} label="复制" />
     </div>
   );
 }
 
-function CopyButton({ text }: { text: string }) {
-  const [done, setDone] = useState(false);
+/**
+ * 复制按钮：非安全上下文（http + 非 localhost）下浏览器不给剪贴板权限，
+ * 这种情况明确弹错让人手动选中，而不是假装复制成功。
+ */
+function CopyButton({ text, label }: { text: string; label: string }) {
   async function copy() {
     try {
       await navigator.clipboard.writeText(text);
-      setDone(true);
-      window.setTimeout(() => setDone(false), 1500);
+      toast.success('已复制到剪贴板');
     } catch {
-      // 非安全上下文（http + 非 localhost）下剪贴板不可用，交给用户手动选中
-      setDone(false);
+      toast.error('复制失败', { description: '当前页面不是安全上下文，请手动选中复制。' });
     }
   }
   return (
-    <button onClick={copy} className="shrink-0 text-xs text-neutral-500 hover:text-neutral-900">
-      {done ? '已复制' : '复制'}
-    </button>
+    <Button variant="ghost" size="xs" onClick={copy}>
+      <CopyIcon data-icon="inline-start" />
+      {label}
+    </Button>
   );
 }
 
 function hintFor(client: Client): string {
   switch (client) {
     case 'claude':
-      return '写入 ~/Library/Application Support/Claude/claude_desktop_config.json 后重启 Claude';
+      return '写入 Claude Desktop 配置后重启客户端';
     case 'cursor':
       return '放到项目下 .cursor/mcp.json（或 ~/.cursor/mcp.json 做全局）';
     case 'vscode':

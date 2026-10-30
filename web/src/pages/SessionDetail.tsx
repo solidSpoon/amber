@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
+import { ArrowLeftIcon, ExternalLinkIcon } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { StatusBadge, VerdictBadge } from '@/components/session-badges';
 import { api, formatAgo, type LogSource, type Session, type SessionEvent } from '../api';
 
 /**
- * 会话详情：左边录像，右边每一步操作。
+ * 会话详情：录像 + 操作时间线 + 日志。
  *
  * 核心交互是「点操作 → 录像跳到那一刻」：两边用的是同一个基准（录像起点），
  * 所以这里直接用后端给的 videoOffsetMs，不再二次换算。
@@ -42,113 +52,155 @@ export default function SessionDetail({ id }: { id: string }) {
     void video.play().catch(() => undefined);
   }
 
-  if (error) return <p className="text-red-600">{error}</p>;
-  if (!session) return <p className="text-neutral-400">加载中…</p>;
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>读取会话失败</AlertTitle>
+        <AlertDescription>{error}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Skeleton className="h-8 w-72" />
+        <Skeleton className="h-64 w-full" />
+      </div>
+    );
+  }
 
   const screenshots = events.filter((e) => e.artifact?.startsWith('screenshots/'));
 
   return (
-    <div className="space-y-4">
-      <header className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <a href="#/sessions" className="text-sm text-neutral-500 hover:text-neutral-900">
-          ← 会话列表
-        </a>
+    <div className="flex flex-col gap-4">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <Button variant="ghost" size="sm" render={<a href="#/sessions" />}>
+          <ArrowLeftIcon data-icon="inline-start" />
+          会话列表
+        </Button>
         <h1 className="font-mono text-lg">{session.id}</h1>
-        <span className="text-sm text-neutral-600">
-          {session.app} @ {session.ref || '—'} · {session.status}
-          {session.verdict ? ` · ${session.verdict}` : ''}
-        </span>
-        <span className="text-sm text-neutral-500">
+        <StatusBadge status={session.status} />
+        <VerdictBadge verdict={session.verdict} />
+        <Badge variant="outline">{session.app}</Badge>
+        <span className="font-mono text-xs text-muted-foreground">{session.ref || '—'}</span>
+        <span className="text-xs text-muted-foreground">
           创建 {formatAgo(session.createdAt)} · 调试端口 {session.cdpPort}
           {session.videoDurationMs > 0 ? ` · 录像 ${(session.videoDurationMs / 1000).toFixed(1)}s` : ''}
         </span>
       </header>
 
       {session.summary && (
-        <p className="rounded-md border border-neutral-200 bg-white px-4 py-2 text-sm text-neutral-700">
-          {session.summary}
-        </p>
+        <Card>
+          <CardContent className="text-sm">{session.summary}</CardContent>
+        </Card>
       )}
 
       {session.error && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-          <div className="mb-1 text-xs font-medium text-red-500">失败原因</div>
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">{session.error}</pre>
-        </div>
+        <Alert variant="destructive">
+          <AlertTitle>失败原因</AlertTitle>
+          <AlertDescription>
+            <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-words">{session.error}</pre>
+          </AlertDescription>
+        </Alert>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <section className="space-y-4">
-          {session.hasVideo ? (
-            <video
-              ref={videoRef}
-              controls
-              preload="metadata"
-              src={`/api/sessions/${session.id}/video`}
-              className="w-full rounded-lg border border-neutral-300 bg-black"
-            />
-          ) : (
-            <div className="flex h-56 items-center justify-center rounded-lg border border-neutral-200 bg-white text-sm text-neutral-400">
-              该会话还没有录像（会话可能仍在运行，或启动阶段就失败了）
-            </div>
-          )}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="flex min-w-0 flex-col gap-4">
+          <Card>
+            <CardContent>
+              {session.hasVideo ? (
+                <video
+                  ref={videoRef}
+                  controls
+                  preload="metadata"
+                  src={`/api/sessions/${session.id}/video`}
+                  className="w-full rounded-md bg-neutral-950"
+                />
+              ) : (
+                <Empty>
+                  <EmptyHeader>
+                    <EmptyTitle>还没有录像</EmptyTitle>
+                    <EmptyDescription>会话仍在运行，或启动阶段就失败了。</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              )}
+            </CardContent>
+          </Card>
 
           {screenshots.length > 0 && (
-            <div className="space-y-2">
-              <h2 className="text-sm font-medium text-neutral-600">截图证据</h2>
-              <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+            <Card>
+              <CardHeader>
+                <CardTitle>截图证据</CardTitle>
+                <CardDescription>点一张跳到录像里的对应时刻。</CardDescription>
+              </CardHeader>
+              <CardContent className="grid grid-cols-2 gap-2 md:grid-cols-3">
                 {screenshots.map((e) => (
                   <button
                     key={e.seq}
                     onClick={() => seek(e)}
-                    className="group overflow-hidden rounded-md border border-neutral-200 bg-white text-left"
+                    className="group overflow-hidden rounded-md border text-left transition hover:bg-muted"
                   >
                     <img
                       src={`/api/sessions/${session.id}/artifacts/${e.artifact!.split('/').pop()}`}
                       alt={e.artifact}
-                      className="aspect-video w-full object-cover transition group-hover:opacity-80"
+                      className="aspect-video w-full object-cover"
                     />
-                    <div className="truncate px-2 py-1 text-xs text-neutral-400">{e.artifact}</div>
+                    <div className="truncate px-2 py-1 text-xs text-muted-foreground">{e.artifact}</div>
                   </button>
                 ))}
-              </div>
-            </div>
+              </CardContent>
+            </Card>
           )}
-        </section>
+        </div>
 
-        <aside className="min-w-0 space-y-4">
-          <h2 className="mb-2 text-sm font-medium text-neutral-600">操作时间线（点一步跳一段录像）</h2>
-          <ol className="space-y-1">
-            {events.length === 0 && <li className="text-sm text-neutral-400">还没有工具调用。</li>}
-            {events.map((e) => (
-              <li key={e.seq}>
-                <button
-                  onClick={() => seek(e)}
-                  className={`w-full rounded-md border px-3 py-2 text-left text-xs transition ${
-                    selected === e.seq
-                      ? 'border-sky-400 bg-sky-50'
-                      : 'border-neutral-200 bg-white hover:border-neutral-300 hover:bg-neutral-50'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-neutral-900">{e.tool}</span>
-                    <span className={e.ok ? 'text-neutral-500' : 'text-red-400'}>
-                      {e.videoOffsetMs >= 0 ? `${(e.videoOffsetMs / 1000).toFixed(1)}s` : '—'}
-                    </span>
-                  </div>
-                  <div className="mt-1 truncate text-neutral-400">{e.result || '(无结果文本)'}</div>
-                </button>
-              </li>
-            ))}
-          </ol>
+        <div className="flex min-w-0 flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>操作时间线</CardTitle>
+              <CardDescription>点一步跳一段录像。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {events.length === 0 ? (
+                <Empty>
+                  <EmptyHeader>
+                    <EmptyTitle>还没有工具调用</EmptyTitle>
+                    <EmptyDescription>模型还没对这台机器做任何操作。</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              ) : (
+                <ScrollArea className="max-h-[420px]">
+                  <ol className="flex flex-col gap-1 pr-3">
+                    {events.map((e) => (
+                      <li key={e.seq}>
+                        <button
+                          onClick={() => seek(e)}
+                          className={`w-full rounded-md border px-3 py-2 text-left text-xs transition hover:bg-muted ${
+                            selected === e.seq ? 'border-ring bg-muted' : 'border-border'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium">{e.tool}</span>
+                            <span className={e.ok ? 'text-muted-foreground' : 'text-destructive'}>
+                              {e.videoOffsetMs >= 0 ? `${(e.videoOffsetMs / 1000).toFixed(1)}s` : '—'}
+                            </span>
+                          </div>
+                          <div className="mt-1 truncate text-muted-foreground">{e.result || '(无结果文本)'}</div>
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                </ScrollArea>
+              )}
+            </CardContent>
+          </Card>
 
           <LogPanel sessionId={session.id} />
-        </aside>
+        </div>
       </div>
     </div>
   );
 }
-
 
 /**
  * 日志面板：容器输出（应用为什么没起来通常只在这里）与应用自身日志切换查看。
@@ -188,47 +240,52 @@ function LogPanel({ sessionId }: { sessionId: string }) {
   }, [sessionId, active, sources.length]);
 
   if (sources.length === 0) {
-    return <p className="text-xs text-neutral-400">暂无日志</p>;
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>日志</CardTitle>
+        </CardHeader>
+        <CardContent className="text-xs text-muted-foreground">暂无日志</CardContent>
+      </Card>
+    );
   }
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-1">
-        {sources.map((source) => (
-          <button
-            key={source.name}
-            onClick={() => setActive(source.name)}
-            className={`rounded-md px-2 py-1 text-xs transition ${
-              active === source.name
-                ? 'bg-neutral-900 text-white'
-                : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
-            }`}
-          >
-            {source.label}
-          </button>
-        ))}
-        <a
-          href={`/api/sessions/${sessionId}/logs/${active}`}
-          target="_blank"
-          rel="noreferrer"
-          className="ml-auto text-xs text-sky-600 hover:underline"
-        >
-          全文 ↗
-        </a>
-      </div>
-      <pre className="max-h-72 overflow-auto rounded-lg bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-200">
-        {formatLog(text) || '（空）'}
-      </pre>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>日志</CardTitle>
+        <CardAction>
+          <Button variant="ghost" size="xs" render={<a href={`/api/sessions/${sessionId}/logs/${active}`} target="_blank" rel="noreferrer" />}>
+            全文
+            <ExternalLinkIcon data-icon="inline-end" />
+          </Button>
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        <Tabs value={active} onValueChange={(value) => setActive(String(value))}>
+          <TabsList className="mb-2 flex-wrap">
+            {sources.map((source) => (
+              <TabsTrigger key={source.name} value={source.name}>
+                {source.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <TabsContent value={active}>
+            <pre className="max-h-72 overflow-auto rounded-md bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-200">
+              {formatLog(text) || '（空）'}
+            </pre>
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+    </Card>
   );
 }
-
 
 /**
  * 把日志压成一眼能扫的形态。
  *
- * DashPlayer 的应用日志是 JSONL，原样贴出来满屏都是 {"schemaVersion":1,…}；
- * 这里把每行折成「时间 级别 [模块] 消息」，解析失败的行原样保留（不能丢信息）。
+ * 应用日志常见是有字段名的 JSONL（time/level/module/message），原样贴出来满屏都是花括号；
+ * 这里把每行折成「时间 级别 [模块] 消息」。解析失败的行原样保留——不能为了让界面好看而丢信息。
  */
 function formatLog(raw: string): string {
   return raw

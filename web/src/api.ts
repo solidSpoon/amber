@@ -56,6 +56,14 @@ export interface Machine {
   statsOk: boolean;
 }
 
+/** 注册表里的被测应用（后端 app 注册表，控制台不写死任何应用名） */
+export interface AppInfo {
+  key: string;
+  name: string;
+  repo: string;
+  description: string;
+}
+
 /** 运行时信息：虚拟屏尺寸等（看板按真实比例画显示器） */
 export interface RuntimeInfo {
   display: { width: number; height: number };
@@ -104,6 +112,7 @@ export const api = {
     post<Session>(`/api/sessions/${id}/stop`, { verdict, summary }),
   listEvents: (id: string) => get<{ events: SessionEvent[] }>(`/api/sessions/${id}/events`),
   metrics: () => get<{ samples: Sample[] }>('/api/system/metrics'),
+  apps: () => get<{ apps: AppInfo[] }>('/api/apps'),
   machines: () => get<{ machines: Machine[] }>('/api/machines'),
   info: () => get<RuntimeInfo>('/api/info'),
 };

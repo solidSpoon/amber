@@ -57,7 +57,7 @@ internal/
   telemetry/        宿主与容器指标采样
   httpapi/          REST + SSE + 内嵌前端
   mcp/              MCP 工具面
-web/                React 管理台（Vite + TS + Tailwind）
+web/                React 管理台（Vite + TS + Tailwind + shadcn/ui）
 deploy/             Dockerfile、systemd unit
 ```
 
@@ -70,6 +70,16 @@ make lint         # golangci-lint
 make web          # 构建前端并内嵌进二进制
 make build        # 产出 bin/rigd（含前端）
 ```
+
+## 管理台
+
+- 组件库用 shadcn/ui（`base-nova` 预置，Base UI + Tailwind v4），组件是源码进仓库的，
+  加组件走 `cd web && npx shadcn@latest add <组件>`，不要手写等价物。
+- **设计必须项目中立**：控制台服务的是"任意 GUI 应用"，不针对某一个被测应用做定制。
+  应用清单来自 `GET /api/apps`（后端 `session` 包的应用注册表），前端不写死任何应用名、
+  不假设某一个应用的页面结构或素材；文案里也不出现具体项目名。
+- 颜色只用语义 token（`bg-background` / `text-muted-foreground` / `bg-muted`…），
+  状态色用 `success` / `warning` / `destructive` 这几个变体，不写 `text-emerald-600` 这类原始色值。
 
 ## 约定
 
