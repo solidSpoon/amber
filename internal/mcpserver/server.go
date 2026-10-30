@@ -44,7 +44,7 @@ func NewServer(mgr *session.Manager, st *store.Store, log *slog.Logger) *mcp.Ser
 	}, nil)
 
 	registerSessionTools(server, s)
-	registerRunTool(server, s)
+	registerBatchTool(server, s)
 	registerFeedbackTool(server, s)
 
 	return server
@@ -190,19 +190,19 @@ type stepArgs struct {
 	Expect string `json:"expect,omitempty" jsonschema:"期望看到什么（会写进报告，方便对照实际结果）"`
 }
 
-func registerRunTool(server *mcp.Server, s *Server) {
+func registerBatchTool(server *mcp.Server, s *Server) {
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "run",
-		Description: "执行一串动作（1~50 步），中间不回到你这边。只有一个动作时就直接给一步。" +
+		Name: "batch",
+		Description: "按顺序执行一串动作（steps 数组，1~50 步），中间不回到你这边；只做一件事就传一个只含一个元素的数组。" +
 			"动作：snapshot 读页面结构 / click 点元素（ref 或 match 文字或 selector）/ fill 填文本 / " +
 			"press_key 按键 / eval 在页面求值 / wait 等条件成立 / screenshot 截图留证 / assert 记一条断言。" +
 			"时效性靠它保证：拖动到 6 秒后立刻截图，两步之间不会隔着你思考的那几十秒。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
-			"每一步都会在验收报告里各记一条，和单独调用没有区别。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args runArgs) (*mcp.CallToolResult, runResult, error) {
-		msg, res, err := s.doRun(ctx, args)
+			"每一步都会在验收报告里各记一条，当作独立的一步来读。",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args batchArgs) (*mcp.CallToolResult, batchResult, error) {
+		msg, res, err := s.doBatch(ctx, args)
 		if err != nil {
-			return nil, runResult{}, err
+			return nil, batchResult{}, err
 		}
 		out := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
 		// 截图类动作把图带上（限 3 张）：没有图，模型只能靠猜画面长什么样
@@ -235,19 +235,19 @@ type waitArgs struct {
 	TimeoutMS int    `json:"timeoutMs,omitempty" jsonschema:"最长等多久（毫秒），默认 5000，最大 60000"`
 }
 
-type runArgs struct {
+type batchArgs struct {
 	SessionID string      `json:"sessionId" jsonschema:"会话 ID"`
-	Steps     []batchStep `json:"steps" jsonschema:"按顺序执行的步骤（1~50 步）"`
+	Steps     []batchStep `json:"steps" jsonschema:"按顺序执行的步骤（1~50 步）；只做一个动作就传一个元素的数组"`
 }
 
-// runResult 给客户端的结构化结果：每一步的成败、元素表、求值结果。
-type runResult struct {
-	OK        bool            `json:"ok"`
-	Steps     []runStepResult `json:"steps"`
-	StoppedAt int             `json:"stoppedAt,omitempty"`
+// batchResult 给客户端的结构化结果：每一步的成败、元素表、求值结果。
+type batchResult struct {
+	OK        bool              `json:"ok"`
+	Steps     []batchStepResult `json:"steps"`
+	StoppedAt int               `json:"stoppedAt,omitempty"`
 }
 
-type runStepResult struct {
+type batchStepResult struct {
 	Index    int               `json:"index"`
 	Action   string            `json:"action"`
 	OK       bool              `json:"ok"`
