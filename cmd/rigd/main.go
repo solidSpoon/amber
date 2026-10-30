@@ -13,10 +13,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
+	"net"
 	"os/signal"
 	"syscall"
 	"time"
@@ -78,11 +80,14 @@ func runMCP(ctx context.Context, manager *session.Manager, logger *slog.Logger) 
 
 // runHTTP 启动管理台：调度器扫超时、采样器采指标、HTTP 出接口与页面。
 func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *session.Manager, docker dockerx.Runner, logger *slog.Logger) {
-	if n, err := manager.RecoverSessions(ctx); err != nil {
-		logger.Warn("接管历史会话失败", "err", err)
-	} else if n > 0 {
-		logger.Info("接管历史会话完成", "count", n)
-	}
+	// 接管历史会话放到后台：它要连 CDP，慢起来会拖住整个启动（HTTP 先能服务更重要）
+	go func() {
+		if n, err := manager.RecoverSessions(ctx); err != nil {
+			logger.Warn("接管历史会话失败", "err", err)
+		} else if n > 0 {
+			logger.Info("接管历史会话完成", "count", n)
+		}
+	}()
 	go manager.RunSweeper(ctx, 30*time.Second)
 	go telemetry.NewSampler(st, docker, cfg.DataDir, logger).Run(ctx, cfg.SampleInterval)
 
@@ -91,9 +96,43 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 		logger.Warn("前端资源不可用，只提供 API", "err", err)
 		webFS = nil
 	}
+
+	// MCP：HTTP 模式下同时挂一个 Streamable HTTP 接入点，并把连接信息交给页面展示。
+	// 工具清单来自服务自身的 tools/list，页面不会和实现漂移。
+	mcpServer := mcpserver.NewServer(manager, logger)
+	mcpTools, err := mcpserver.Catalog(ctx, mcpServer)
+	if err != nil {
+		logger.Warn("读取 MCP 工具清单失败，页面将不显示工具列表", "err", err)
+	}
+	token, err := cfg.LoadOrCreateMCPToken()
+	if err != nil {
+		logger.Error("准备 MCP 令牌失败", "err", err)
+		os.Exit(1)
+	}
+	mcpURL := fmt.Sprintf("http://%s/mcp", advertisedAddr(cfg.Addr))
+
+	api := httpapi.New(httpapi.Options{
+		Config: cfg, Store: st, Manager: manager, WebFS: webFS, Log: logger,
+		MCP: httpapi.MCPInfo{
+			HTTPURL: mcpURL, Token: token, HTTPEnabled: true, Tools: mcpTools,
+			Command: []string{"rigd", "--mcp"},
+			Env: map[string]string{
+				"RIGD_DATA_DIR":  cfg.DataDir,
+				"RIGD_IMAGE":     cfg.Image,
+				"RIGD_MEDIA_DIR": cfg.MediaDir,
+			},
+		},
+	})
+
+	router := api.Handler()
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", httpapi.Guard(token, httpapi.NewMCPHandler(mcpServer)))
+	mux.Handle("/mcp/", httpapi.Guard(token, httpapi.NewMCPHandler(mcpServer)))
+	mux.Handle("/", router)
+
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           httpapi.New(cfg, st, manager, webFS, logger).Handler(),
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -132,4 +171,30 @@ func mustActive(st *store.Store, logger *slog.Logger) []string {
 		ids = append(ids, sess.ID)
 	}
 	return ids
+}
+
+// advertisedAddr 把监听地址转成人能点开的地址。
+//
+// 绑 0.0.0.0/:: 时页面需要一个具体主机名，这里取本机第一个非回环 IPv4；
+// 取不到就退回 127.0.0.1（同机使用）。
+func advertisedAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host != "" && host != "0.0.0.0" && host != "::" {
+		return net.JoinHostPort(host, port)
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if v4 := ipNet.IP.To4(); v4 != nil {
+				return net.JoinHostPort(v4.String(), port)
+			}
+		}
+	}
+	return net.JoinHostPort("127.0.0.1", port)
 }

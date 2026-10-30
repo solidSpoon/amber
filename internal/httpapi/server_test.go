@@ -100,7 +100,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *session.Manager) {
 	}, log)
 
 	webFS := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>app</html>")}}
-	srv := httptest.NewServer(New(cfg, st, mgr, webFS, log).Handler())
+	srv := httptest.NewServer(New(Options{Config: cfg, Store: st, Manager: mgr, WebFS: webFS, Log: log}).Handler())
 	t.Cleanup(srv.Close)
 	return srv, mgr
 }

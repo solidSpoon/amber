@@ -763,6 +763,16 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 	for _, sess := range active {
 		live := &liveSession{session: sess, lastActivity: time.Now()}
 
+		// 只接管"明确就绪"的会话：starting/stopping 是上一个进程留下的半截状态，
+		// 接管它们要么白等端口，要么留下永远收不完的尾。
+		if sess.Status != store.StatusReady {
+			sess.Status = store.StatusFailed
+			sess.Error = fmt.Sprintf("控制面重启时该会话处于 %s 状态，已放弃接管", sess.Status)
+			sess.EndedAt = time.Now()
+			_ = m.store.UpdateSession(ctx, sess)
+			continue
+		}
+
 		// 容器没了就标记失败，别让它一直挂在"运行中"
 		state, err := m.docker.Inspect(ctx, "rigd-"+sess.ID)
 		if err != nil || !state.Running {
@@ -773,10 +783,19 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 			continue
 		}
 
-		if inspector, err := m.factory(ctx, sess.CDPPort); err == nil {
+		// 接管必须快：端口连不上就放弃，不能把启动流程堵在这里（原来会阻塞 5 分钟）
+		dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		inspector, dialErr := m.factory(dialCtx, sess.CDPPort)
+		cancel()
+		if dialErr == nil {
 			live.inspector = inspector
 		} else {
-			m.log.Warn("接管会话时连接调试端口失败", "session", sess.ID, "err", err)
+			m.log.Warn("接管会话时连接调试端口失败，会话标记为失败", "session", sess.ID, "err", dialErr)
+			sess.Status = store.StatusFailed
+			sess.Error = fmt.Sprintf("接管失败：%v", dialErr)
+			sess.EndedAt = time.Now()
+			_ = m.store.UpdateSession(ctx, sess)
+			continue
 		}
 		if ms, err := m.readRecordingStart(ctx, "rigd-"+sess.ID); err == nil {
 			live.recordingStartMs = ms

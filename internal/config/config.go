@@ -5,6 +5,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -44,6 +46,9 @@ type Config struct {
 	SampleInterval time.Duration
 	// LogLevel 日志级别。
 	LogLevel slog.Level
+	// MCPToken HTTP 方式接 MCP 的访问令牌。为空时启动会生成一个并落盘，
+	// 避免把「能起容器的接口」裸奔在局域网上。
+	MCPToken string
 }
 
 // DisplayConfig 虚拟屏尺寸与窗口环境。
@@ -73,6 +78,7 @@ func Load() (*Config, error) {
 		CDPPortBase:    envInt("RIGD_CDP_PORT_BASE", 9222),
 		VNCPortBase:    envInt("RIGD_VNC_PORT_BASE", 6080),
 		SampleInterval: envDuration("RIGD_SAMPLE_INTERVAL", 5*time.Second),
+		MCPToken:       env("RIGD_MCP_TOKEN", ""),
 		LogLevel:       envLogLevel("RIGD_LOG_LEVEL", slog.LevelInfo),
 		Display: DisplayConfig{
 			Width:  envInt("RIGD_DISPLAY_W", 1280),
@@ -97,6 +103,32 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("创建数据目录 %s 失败: %w", cfg.DataDir, err)
 	}
 	return cfg, nil
+}
+
+// LoadOrCreateMCPToken 读取（或首次生成）MCP 访问令牌。
+//
+// 令牌存在数据目录里而不是每次都重新生成：否则重启后所有客户端配置都得改一遍。
+func (c *Config) LoadOrCreateMCPToken() (string, error) {
+	if c.MCPToken != "" {
+		return c.MCPToken, nil
+	}
+	path := filepath.Join(c.DataDir, "mcp.token")
+	if raw, err := os.ReadFile(path); err == nil {
+		if token := strings.TrimSpace(string(raw)); token != "" {
+			c.MCPToken = token
+			return token, nil
+		}
+	}
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("生成 MCP 令牌失败: %w", err)
+	}
+	token := "rigd_" + hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		return "", fmt.Errorf("写入 MCP 令牌失败: %w", err)
+	}
+	c.MCPToken = token
+	return token, nil
 }
 
 // SessionsDir 会话产物根目录（每个会话一个子目录）。

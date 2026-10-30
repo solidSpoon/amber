@@ -1,22 +1,29 @@
 import { useEffect, useState } from 'react';
 import Dashboard from './pages/Dashboard';
+import Mcp from './pages/Mcp';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
 
 // 用 hash 路由而不是 react-router：页面只有三个，且部署在单文件二进制里，
 // hash 不需要服务端配合，刷新/直链都不会 404。
-type Route = { name: 'dashboard' } | { name: 'sessions' } | { name: 'session'; id: string };
+type Route =
+  | { name: 'dashboard' }
+  | { name: 'sessions' }
+  | { name: 'session'; id: string }
+  | { name: 'mcp' };
 
 function parseRoute(hash: string): Route {
   const clean = hash.replace(/^#\/?/, '');
   if (clean.startsWith('sessions/')) return { name: 'session', id: clean.slice('sessions/'.length) };
   if (clean === 'sessions') return { name: 'sessions' };
+  if (clean === 'mcp') return { name: 'mcp' };
   return { name: 'dashboard' };
 }
 
 const NAV: { href: string; label: string; key: Route['name'] }[] = [
   { href: '#/', label: '看板', key: 'dashboard' },
   { href: '#/sessions', label: '验收会话', key: 'sessions' },
+  { href: '#/mcp', label: 'MCP 接入', key: 'mcp' },
 ];
 
 export default function App() {
@@ -56,6 +63,7 @@ export default function App() {
         {route.name === 'dashboard' && <Dashboard />}
         {route.name === 'sessions' && <Sessions />}
         {route.name === 'session' && <SessionDetail id={route.id} />}
+        {route.name === 'mcp' && <Mcp />}
       </main>
     </div>
   );

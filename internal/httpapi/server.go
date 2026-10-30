@@ -26,9 +26,36 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/solidSpoon/rigd/internal/config"
+	"github.com/solidSpoon/rigd/internal/mcpserver"
 	"github.com/solidSpoon/rigd/internal/session"
 	"github.com/solidSpoon/rigd/internal/store"
 )
+
+// MCPInfo 管理台「MCP」页要展示的连接信息。
+type MCPInfo struct {
+	// HTTPURL 远程接入地址（Streamable HTTP）。
+	HTTPURL string
+	// Token 访问令牌（Authorization: Bearer）。
+	Token string
+	// Command stdio 方式的启动命令。
+	Command []string
+	// Env stdio 方式需要带的环境变量。
+	Env map[string]string
+	// Tools 当前进程实际暴露的工具（由 MCP 自己 tools/list 得到，不手写）。
+	Tools []mcpserver.ToolInfo
+	// HTTPEnabled 是否挂载了 HTTP 接入点。
+	HTTPEnabled bool
+}
+
+// Options 构造参数。
+type Options struct {
+	Config  *config.Config
+	Store   *store.Store
+	Manager *session.Manager
+	WebFS   fs.FS
+	Log     *slog.Logger
+	MCP     MCPInfo
+}
 
 // Server 组装路由。
 type Server struct {
@@ -37,11 +64,15 @@ type Server struct {
 	manager *session.Manager
 	webFS   fs.FS
 	log     *slog.Logger
+	mcp     MCPInfo
 }
 
-// New 构造 HTTP 服务。webFS 为 nil 时前端路由返回 404（API 仍可用）。
-func New(cfg *config.Config, st *store.Store, mgr *session.Manager, webFS fs.FS, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, store: st, manager: mgr, webFS: webFS, log: log}
+// New 构造 HTTP 服务。WebFS 为 nil 时前端路由返回 404（API 仍可用）。
+func New(opts Options) *Server {
+	return &Server{
+		cfg: opts.Config, store: opts.Store, manager: opts.Manager,
+		webFS: opts.WebFS, log: opts.Log, mcp: opts.MCP,
+	}
 }
 
 // Handler 返回带中间件的根路由器。
@@ -76,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/stream", s.streamSessions)
 		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
 		api.Get("/machines", s.machines)
+		api.Get("/mcp", s.mcpInfo)
 		api.Get("/system/metrics", s.systemMetrics)
 		api.Get("/system/stream", s.streamSystem)
 	})
