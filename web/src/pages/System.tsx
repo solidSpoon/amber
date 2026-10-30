@@ -41,9 +41,9 @@ export default function System() {
         <Metric label="运行中的容器" value={latest ? String(latest.containers) : '—'} data={samples.map((s) => s.containers)} />
       </div>
 
-      <section className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
-        <h2 className="mb-2 text-sm font-medium text-neutral-400">采样</h2>
-        <p className="text-xs text-neutral-500">
+      <section className="rounded-lg border border-neutral-200 bg-white p-4">
+        <h2 className="mb-2 text-sm font-medium text-neutral-600">采样</h2>
+        <p className="text-xs text-neutral-400">
           共 {samples.length} 条，最近一条 {latest ? new Date(latest.at).toLocaleTimeString() : '—'}。
           采样间隔由 RIGD_SAMPLE_INTERVAL 控制（默认 5s）。
         </p>
@@ -60,10 +60,10 @@ function pct(used: number, total: number): string {
 /** 指标卡：数值 + 一条极简折线（内联 SVG，不引图表库）。 */
 function Metric({ label, value, hint, data }: { label: string; value: string; hint?: string; data: number[] }) {
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
+    <div className="rounded-lg border border-neutral-200 bg-white p-4">
       <div className="text-xs text-neutral-500">{label}</div>
       <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
-      {hint && <div className="mt-0.5 text-xs text-neutral-500">{hint}</div>}
+      {hint && <div className="mt-0.5 text-xs text-neutral-400">{hint}</div>}
       <Sparkline data={data} />
     </div>
   );
@@ -84,7 +84,7 @@ function Sparkline({ data }: { data: number[] }) {
     .join(' ');
   return (
     <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="mt-3 h-10 w-full">
-      <path d={path} fill="none" stroke="currentColor" strokeWidth="2" vectorEffect="non-scaling-stroke" className="text-emerald-400" />
+      <path d={path} fill="none" stroke="currentColor" strokeWidth="2" vectorEffect="non-scaling-stroke" className="text-emerald-500" />
     </svg>
   );
 }

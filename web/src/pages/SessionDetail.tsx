@@ -42,19 +42,19 @@ export default function SessionDetail({ id }: { id: string }) {
     void video.play().catch(() => undefined);
   }
 
-  if (error) return <p className="text-red-400">{error}</p>;
-  if (!session) return <p className="text-neutral-500">加载中…</p>;
+  if (error) return <p className="text-red-600">{error}</p>;
+  if (!session) return <p className="text-neutral-400">加载中…</p>;
 
   const screenshots = events.filter((e) => e.artifact?.startsWith('screenshots/'));
 
   return (
     <div className="space-y-4">
       <header className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <a href="#/sessions" className="text-sm text-neutral-500 hover:text-neutral-300">
+        <a href="#/sessions" className="text-sm text-neutral-500 hover:text-neutral-900">
           ← 会话列表
         </a>
         <h1 className="font-mono text-lg">{session.id}</h1>
-        <span className="text-sm text-neutral-400">
+        <span className="text-sm text-neutral-600">
           {session.app} @ {session.ref || '—'} · {session.status}
           {session.verdict ? ` · ${session.verdict}` : ''}
         </span>
@@ -65,7 +65,7 @@ export default function SessionDetail({ id }: { id: string }) {
       </header>
 
       {session.summary && (
-        <p className="rounded-md border border-neutral-800 bg-neutral-900/40 px-4 py-2 text-sm text-neutral-300">
+        <p className="rounded-md border border-neutral-200 bg-white px-4 py-2 text-sm text-neutral-700">
           {session.summary}
         </p>
       )}
@@ -78,30 +78,30 @@ export default function SessionDetail({ id }: { id: string }) {
               controls
               preload="metadata"
               src={`/api/sessions/${session.id}/video`}
-              className="w-full rounded-lg border border-neutral-800 bg-black"
+              className="w-full rounded-lg border border-neutral-300 bg-black"
             />
           ) : (
-            <div className="flex h-56 items-center justify-center rounded-lg border border-neutral-800 text-sm text-neutral-500">
+            <div className="flex h-56 items-center justify-center rounded-lg border border-neutral-200 bg-white text-sm text-neutral-400">
               该会话还没有录像（会话可能仍在运行，或启动阶段就失败了）
             </div>
           )}
 
           {screenshots.length > 0 && (
             <div className="space-y-2">
-              <h2 className="text-sm font-medium text-neutral-400">截图证据</h2>
+              <h2 className="text-sm font-medium text-neutral-600">截图证据</h2>
               <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
                 {screenshots.map((e) => (
                   <button
                     key={e.seq}
                     onClick={() => seek(e)}
-                    className="group overflow-hidden rounded-md border border-neutral-800 text-left"
+                    className="group overflow-hidden rounded-md border border-neutral-200 bg-white text-left"
                   >
                     <img
                       src={`/api/sessions/${session.id}/artifacts/${e.artifact!.split('/').pop()}`}
                       alt={e.artifact}
                       className="aspect-video w-full object-cover transition group-hover:opacity-80"
                     />
-                    <div className="truncate px-2 py-1 text-xs text-neutral-500">{e.artifact}</div>
+                    <div className="truncate px-2 py-1 text-xs text-neutral-400">{e.artifact}</div>
                   </button>
                 ))}
               </div>
@@ -110,26 +110,26 @@ export default function SessionDetail({ id }: { id: string }) {
         </section>
 
         <aside className="min-w-0">
-          <h2 className="mb-2 text-sm font-medium text-neutral-400">操作时间线（点一步跳一段录像）</h2>
+          <h2 className="mb-2 text-sm font-medium text-neutral-600">操作时间线（点一步跳一段录像）</h2>
           <ol className="space-y-1">
-            {events.length === 0 && <li className="text-sm text-neutral-500">还没有工具调用。</li>}
+            {events.length === 0 && <li className="text-sm text-neutral-400">还没有工具调用。</li>}
             {events.map((e) => (
               <li key={e.seq}>
                 <button
                   onClick={() => seek(e)}
                   className={`w-full rounded-md border px-3 py-2 text-left text-xs transition ${
                     selected === e.seq
-                      ? 'border-sky-500/60 bg-sky-500/10'
-                      : 'border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900/60'
+                      ? 'border-sky-400 bg-sky-50'
+                      : 'border-neutral-200 bg-white hover:border-neutral-300 hover:bg-neutral-50'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-neutral-200">{e.tool}</span>
+                    <span className="font-medium text-neutral-900">{e.tool}</span>
                     <span className={e.ok ? 'text-neutral-500' : 'text-red-400'}>
                       {e.videoOffsetMs >= 0 ? `${(e.videoOffsetMs / 1000).toFixed(1)}s` : '—'}
                     </span>
                   </div>
-                  <div className="mt-1 truncate text-neutral-500">{e.result || '(无结果文本)'}</div>
+                  <div className="mt-1 truncate text-neutral-400">{e.result || '(无结果文本)'}</div>
                 </button>
               </li>
             ))}

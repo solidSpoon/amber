@@ -2,4 +2,6 @@
 
 /* 只做少量全局兜底：颜色一律走 Tailwind 的语义色阶，避免出现自定义主题变量 */
 html, body, #root { height: 100%; }
-body { @apply bg-neutral-950 text-neutral-200 antialiased; }
+body { @apply bg-neutral-50 text-neutral-800 antialiased; }
+
+:root { color-scheme: light; }

@@ -30,7 +30,7 @@ export default function App() {
 
   return (
     <div className="flex min-h-full">
-      <aside className="w-56 shrink-0 border-r border-neutral-800 bg-neutral-900/40 p-4">
+      <aside className="w-56 shrink-0 border-r border-neutral-200 bg-white p-4">
         <div className="mb-6">
           <div className="text-lg font-semibold tracking-tight">rigd</div>
           <div className="text-xs text-neutral-500">一次性 GUI 验收控制台</div>
@@ -42,8 +42,8 @@ export default function App() {
               href={item.href}
               className={`block rounded-md px-3 py-2 text-sm transition ${
                 route.name === item.key
-                  ? 'bg-neutral-800 text-neutral-100'
-                  : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200'
+                  ? 'bg-neutral-100 font-medium text-neutral-900'
+                  : 'text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900'
               }`}
             >
               {item.label}

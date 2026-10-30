@@ -2,18 +2,18 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, formatAgo, type Session } from '../api';
 
 const STATUS_STYLE: Record<string, string> = {
-  ready: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
-  starting: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
-  stopping: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-  finished: 'bg-neutral-500/15 text-neutral-300 border-neutral-500/30',
-  failed: 'bg-red-500/15 text-red-300 border-red-500/30',
-  abandoned: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+  ready: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  starting: 'bg-sky-50 text-sky-700 border-sky-200',
+  stopping: 'bg-amber-50 text-amber-700 border-amber-200',
+  finished: 'bg-neutral-100 text-neutral-600 border-neutral-200',
+  failed: 'bg-red-50 text-red-700 border-red-200',
+  abandoned: 'bg-purple-50 text-purple-700 border-purple-200',
 };
 
 const VERDICT_STYLE: Record<string, string> = {
-  pass: 'text-emerald-400',
-  fail: 'text-red-400',
-  inconclusive: 'text-amber-400',
+  pass: 'text-emerald-600',
+  fail: 'text-red-600',
+  inconclusive: 'text-amber-600',
 };
 
 /** 会话列表：新建、查看、结束。列表通过 SSE 自动刷新，不用手动点。 */
@@ -33,18 +33,12 @@ export default function Sessions() {
     }
   }, []);
 
+  // 列表用 3 秒轮询：控制台只需要"接近实时"，轮询比长连接少一堆边界情况
+  // （重连、页面隐藏、代理超时），也让无头浏览器能直接截到首屏。
   useEffect(() => {
     void load();
-    const source = new EventSource('/api/sessions/stream');
-    source.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as { sessions: Session[] };
-        setSessions(payload.sessions ?? []);
-      } catch {
-        // 单帧坏了不影响后续
-      }
-    };
-    return () => source.close();
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => window.clearInterval(timer);
   }, [load]);
 
   async function onCreate() {
@@ -76,21 +70,21 @@ export default function Sessions() {
         <p className="mt-1 text-sm text-neutral-500">一个会话 = 一台一次性测试机：起容器、构建应用、全程录屏。</p>
       </header>
 
-      <section className="flex flex-wrap items-end gap-3 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
+      <section className="flex flex-wrap items-end gap-3 rounded-lg border border-neutral-200 bg-white p-4">
         <label className="text-sm">
-          <span className="mb-1 block text-neutral-400">应用</span>
+          <span className="mb-1 block text-neutral-500">应用</span>
           <input
             value={app}
             onChange={(e) => setApp(e.target.value)}
-            className="w-40 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-1.5 text-sm outline-none focus:border-neutral-500"
+            className="w-40 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-neutral-400"
           />
         </label>
         <label className="text-sm">
-          <span className="mb-1 block text-neutral-400">分支 / commit</span>
+          <span className="mb-1 block text-neutral-500">分支 / commit</span>
           <input
             value={ref}
             onChange={(e) => setRef(e.target.value)}
-            className="w-56 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-1.5 text-sm outline-none focus:border-neutral-500"
+            className="w-56 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-neutral-400"
           />
         </label>
         <button
@@ -100,12 +94,12 @@ export default function Sessions() {
         >
           {busy ? '创建中…' : '新建会话'}
         </button>
-        {error && <span className="text-sm text-red-400">{error}</span>}
+        {error && <span className="text-sm text-red-600">{error}</span>}
       </section>
 
-      <section className="overflow-hidden rounded-lg border border-neutral-800">
+      <section className="overflow-hidden rounded-lg border border-neutral-200 bg-white">
         <table className="w-full text-sm">
-          <thead className="bg-neutral-900/60 text-left text-neutral-400">
+          <thead className="bg-neutral-50 text-left text-neutral-500">
             <tr>
               <th className="px-4 py-2 font-medium">会话</th>
               <th className="px-4 py-2 font-medium">应用 / 版本</th>
@@ -118,15 +112,15 @@ export default function Sessions() {
           <tbody>
             {sessions.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-neutral-500">
+                <td colSpan={6} className="px-4 py-10 text-center text-neutral-400">
                   还没有会话。上面填个分支点「新建会话」就能起一台。
                 </td>
               </tr>
             )}
             {sessions.map((s) => (
-              <tr key={s.id} className="border-t border-neutral-800 hover:bg-neutral-900/40">
+              <tr key={s.id} className="border-t border-neutral-200 hover:bg-neutral-50">
                 <td className="px-4 py-2">
-                  <a href={`#/sessions/${s.id}`} className="font-mono text-xs text-sky-400 hover:underline">
+                  <a href={`#/sessions/${s.id}`} className="font-mono text-xs text-sky-600 hover:underline">
                     {s.id}
                   </a>
                 </td>
@@ -142,10 +136,10 @@ export default function Sessions() {
                 <td className={`px-4 py-2 ${VERDICT_STYLE[s.verdict ?? ''] ?? 'text-neutral-500'}`}>
                   {s.verdict || '—'}
                 </td>
-                <td className="px-4 py-2 text-neutral-400">{formatAgo(s.createdAt)}</td>
+                <td className="px-4 py-2 text-neutral-500">{formatAgo(s.createdAt)}</td>
                 <td className="px-4 py-2 text-right">
                   {!['finished', 'failed', 'abandoned'].includes(s.status) && (
-                    <button onClick={() => onStop(s.id)} className="text-xs text-neutral-400 hover:text-red-400">
+                    <button onClick={() => onStop(s.id)} className="text-xs text-neutral-500 hover:text-red-600">
                       结束
                     </button>
                   )}
