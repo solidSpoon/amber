@@ -3,6 +3,14 @@
 
 export type SessionStatus = 'starting' | 'ready' | 'stopping' | 'finished' | 'failed' | 'abandoned';
 
+/** 画面几何（像素）；后端只在几何已知时才给，旧录像会是 undefined */
+export interface Geometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface Session {
   id: string;
   app: string;
@@ -17,6 +25,10 @@ export interface Session {
   idleDeadline?: string;
   hasVideo: boolean;
   videoDurationMs: number;
+  /** 录像里真正有内容的那块区域（= 应用窗口） */
+  frame?: Geometry;
+  /** 录像的整幅像素（= 录制时的虚拟屏） */
+  display?: Geometry;
   verdict?: string;
   summary?: string;
   error?: string;

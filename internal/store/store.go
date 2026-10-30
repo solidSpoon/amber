@@ -51,20 +51,35 @@ func (s Status) Terminal() bool {
 	return false
 }
 
+// Rect 画面几何（像素）。X/Y 是左上角在虚拟屏里的位置，Width/Height 是有内容的尺寸。
+type Rect struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+// Known 判断几何是否有效。
+func (r Rect) Known() bool { return r.Width > 0 && r.Height > 0 }
+
 // Session 一次验收会话（= 一台一次性测试机）。
 type Session struct {
-	ID              string
-	App             string
-	Ref             string
-	CommitSHA       string
-	Image           string
-	Container       string
-	Status          Status
-	CDPPort         int
-	VNCPort         int
+	ID        string
+	App       string
+	Ref       string
+	CommitSHA string
+	Image     string
+	Container string
+	Status    Status
+	CDPPort   int
+	VNCPort   int
 	// Slot 占用的机器槽位（0..N-1），看板按槽位固定展示两台机器
-	Slot            int
-	Dir             string
+	Slot int
+	Dir  string
+	// Frame 录像里真正有内容的那块区域（= 应用窗口），零值表示未知。
+	// Display 它所在的虚拟屏；两者不同就说明录进去的桌面比窗口大。
+	Frame           Rect
+	Display         Rect
 	CreatedAt       time.Time
 	StartedAt       time.Time
 	EndedAt         time.Time
@@ -230,10 +245,12 @@ func parseTime(v sql.NullString) time.Time {
 func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions
 		(id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+		 frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 		 created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.App, sess.Ref, sess.CommitSHA, sess.Image, sess.Container, string(sess.Status),
 		sess.CDPPort, sess.VNCPort, sess.Slot, sess.Dir,
+		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		sess.CreatedAt.UTC().Format(time.RFC3339Nano), formatTime(sess.StartedAt), formatTime(sess.EndedAt),
 		formatTime(sess.IdleDeadline), sess.VideoPath, sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error)
 	if err != nil {
@@ -246,10 +263,12 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET
 		container = ?, status = ?, cdp_port = ?, vnc_port = ?,
+		frame_x = ?, frame_y = ?, frame_w = ?, frame_h = ?, display_w = ?, display_h = ?,
 		started_at = ?, ended_at = ?, idle_deadline = ?,
 		video_path = ?, video_duration_ms = ?, verdict = ?, summary = ?, error = ?, commit_sha = ?
 		WHERE id = ?`,
 		sess.Container, string(sess.Status), sess.CDPPort, sess.VNCPort,
+		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		formatTime(sess.StartedAt), formatTime(sess.EndedAt), formatTime(sess.IdleDeadline),
 		sess.VideoPath, sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error, sess.CommitSHA, sess.ID)
 	if err != nil {
@@ -266,17 +285,21 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 var ErrNotFound = errors.New("记录不存在")
 
 const sessionColumns = `id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 	created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error`
 
 func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 	var (
-		sess                              Session
-		status                            string
-		createdAt                         string
-		startedAt, endedAt, idleDeadline  sql.NullString
+		sess                             Session
+		status                           string
+		createdAt                        string
+		startedAt, endedAt, idleDeadline sql.NullString
 	)
 	err := sc.Scan(&sess.ID, &sess.App, &sess.Ref, &sess.CommitSHA, &sess.Image, &sess.Container, &status,
-		&sess.CDPPort, &sess.VNCPort, &sess.Slot, &sess.Dir, &createdAt, &startedAt, &endedAt, &idleDeadline,
+		&sess.CDPPort, &sess.VNCPort, &sess.Slot, &sess.Dir,
+		&sess.Frame.X, &sess.Frame.Y, &sess.Frame.Width, &sess.Frame.Height,
+		&sess.Display.Width, &sess.Display.Height,
+		&createdAt, &startedAt, &endedAt, &idleDeadline,
 		&sess.VideoPath, &sess.VideoDurationMS, &sess.Verdict, &sess.Summary, &sess.Error)
 	if err != nil {
 		return Session{}, err

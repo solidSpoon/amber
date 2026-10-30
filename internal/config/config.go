@@ -58,6 +58,9 @@ type Config struct {
 type DisplayConfig struct {
 	Width  int
 	Height int
+	// Num X 显示号（:Num）。控制面在容器里执行窗口操作时要显式带上它：
+	// docker exec 拿不到 entrypoint 里 export 的环境变量。
+	Num int
 }
 
 // RecordConfig 录屏参数。
@@ -87,6 +90,7 @@ func Load() (*Config, error) {
 		Display: DisplayConfig{
 			Width:  envInt("RIGD_DISPLAY_W", 1280),
 			Height: envInt("RIGD_DISPLAY_H", 800),
+			Num:    envInt("RIGD_DISPLAY_NUM", 99),
 		},
 		Record: RecordConfig{
 			FPS: envInt("RIGD_RECORD_FPS", 20),
@@ -99,6 +103,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.Display.Width < 640 || cfg.Display.Height < 480 {
 		return nil, fmt.Errorf("虚拟屏尺寸过小：%dx%d", cfg.Display.Width, cfg.Display.Height)
+	}
+	if cfg.Display.Num < 0 || cfg.Display.Num > 99 {
+		return nil, fmt.Errorf("RIGD_DISPLAY_NUM 需在 0~99，收到 %d", cfg.Display.Num)
 	}
 	if cfg.Record.FPS < 1 || cfg.Record.FPS > 60 {
 		return nil, fmt.Errorf("RIGD_RECORD_FPS 需在 1~60，收到 %d", cfg.Record.FPS)

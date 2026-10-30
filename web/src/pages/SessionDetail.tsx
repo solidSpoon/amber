@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeftIcon, ExternalLinkIcon } from 'lucide-react';
+import { ArrowLeftIcon, ExternalLinkIcon, PauseIcon, PlayIcon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/u
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ScreenStage } from '@/components/screen-stage';
 import { StatusBadge, VerdictBadge } from '@/components/session-badges';
 import { api, formatAgo, type LogSource, type Session, type SessionEvent } from '../api';
 
@@ -22,6 +23,9 @@ export default function SessionDetail({ id }: { id: string }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<number | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -52,6 +56,13 @@ export default function SessionDetail({ id }: { id: string }) {
     void video.play().catch(() => undefined);
   }
 
+  function togglePlay() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => undefined);
+    else video.pause();
+  }
+
   if (error) {
     return (
       <Alert variant="destructive">
@@ -71,6 +82,11 @@ export default function SessionDetail({ id }: { id: string }) {
   }
 
   const screenshots = events.filter((e) => e.artifact?.startsWith('screenshots/'));
+  // 录像整幅像素画得比窗口大，就说明录进去了一块桌面——界面要裁掉它，并且说清楚为什么。
+  const cropped =
+    !!session.frame &&
+    !!session.display &&
+    (session.frame.width !== session.display.width || session.frame.height !== session.display.height);
 
   return (
     <div className="flex flex-col gap-4">
@@ -87,6 +103,7 @@ export default function SessionDetail({ id }: { id: string }) {
         <span className="text-xs text-muted-foreground">
           创建 {formatAgo(session.createdAt)} · 调试端口 {session.cdpPort}
           {session.videoDurationMs > 0 ? ` · 录像 ${(session.videoDurationMs / 1000).toFixed(1)}s` : ''}
+          {session.frame ? ` · 画幅 ${session.frame.width}×${session.frame.height}` : ''}
         </span>
       </header>
 
@@ -108,20 +125,65 @@ export default function SessionDetail({ id }: { id: string }) {
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex min-w-0 flex-col gap-4">
           <Card>
-            <CardContent>
+            <CardHeader>
+              <CardTitle>录像</CardTitle>
+              <CardDescription>
+                {cropped
+                  ? `录制时应用窗口没铺满虚拟屏（${session.display!.width}×${session.display!.height}），已按窗口区域裁剪显示。`
+                  : '点右侧任意一步，录像跳到那一刻。'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
               {session.hasVideo ? (
-                <video
-                  ref={videoRef}
-                  controls
-                  preload="metadata"
-                  src={`/api/sessions/${session.id}/video`}
-                  className="w-full rounded-md bg-neutral-950"
-                />
+                <>
+                  <ScreenStage frame={session.frame} display={session.display}>
+                    <video
+                      ref={videoRef}
+                      preload="metadata"
+                      poster={`/api/sessions/${session.id}/poster`}
+                      src={`/api/sessions/${session.id}/video`}
+                      className="size-full"
+                      onPlay={() => setPlaying(true)}
+                      onPause={() => setPlaying(false)}
+                      onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
+                      onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+                      onEnded={() => setPlaying(false)}
+                    />
+                  </ScreenStage>
+                  <div className="flex items-center gap-3">
+                    <Button size="icon-sm" variant="ghost" onClick={togglePlay} aria-label={playing ? '暂停' : '播放'}>
+                      {playing ? <PauseIcon /> : <PlayIcon />}
+                    </Button>
+                    <span className="w-10 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+                      {formatClock(time)}
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={duration || 0}
+                      step={0.1}
+                      value={Math.min(time, duration || 0)}
+                      onChange={(e) => {
+                        const video = videoRef.current;
+                        if (!video) return;
+                        video.currentTime = Number(e.target.value);
+                        setTime(video.currentTime);
+                      }}
+                      className="h-1 min-w-0 flex-1 accent-foreground"
+                      aria-label="录像进度"
+                    />
+                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+                      {formatClock(duration)}
+                    </span>
+                  </div>
+                </>
               ) : (
                 <Empty>
                   <EmptyHeader>
                     <EmptyTitle>还没有录像</EmptyTitle>
-                    <EmptyDescription>会话仍在运行，或启动阶段就失败了。</EmptyDescription>
+                    <EmptyDescription>
+                      会话还在启动（录屏从「窗口铺满 + 应用可操作」那一刻才开始），或启动阶段就失败了。
+                    </EmptyDescription>
                   </EmptyHeader>
                 </Empty>
               )}
@@ -144,7 +206,8 @@ export default function SessionDetail({ id }: { id: string }) {
                     <img
                       src={`/api/sessions/${session.id}/artifacts/${e.artifact!.split('/').pop()}`}
                       alt={e.artifact}
-                      className="aspect-video w-full object-cover"
+                      // contain 而不是 cover：截图尺寸跟着窗口走，cover 会按缩略图框裁掉边缘
+                      className="aspect-video w-full bg-neutral-950 object-contain"
                     />
                     <div className="truncate px-2 py-1 text-xs text-muted-foreground">{e.artifact}</div>
                   </button>
@@ -200,6 +263,16 @@ export default function SessionDetail({ id }: { id: string }) {
       </div>
     </div>
   );
+}
+
+/** 录像里显示的秒数：m:ss，超过一小时才是 h:mm:ss */
+function formatClock(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const s = String(total % 60).padStart(2, '0');
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
 /**

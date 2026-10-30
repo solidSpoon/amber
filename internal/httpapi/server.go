@@ -105,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 		api.Post("/sessions/{id}/fill", s.actionFill)
 		api.Post("/sessions/{id}/press", s.actionPress)
 		api.Get("/sessions/{id}/video", s.serveVideo)
+		api.Get("/sessions/{id}/poster", s.servePoster)
 		api.Get("/sessions/{id}/artifacts/{name}", s.serveArtifact)
 		api.Get("/sessions/stream", s.streamSessions)
 		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
@@ -136,9 +137,27 @@ type sessionDTO struct {
 	IdleDeadline    string `json:"idleDeadline,omitempty"`
 	HasVideo        bool   `json:"hasVideo"`
 	VideoDurationMS int64  `json:"videoDurationMs"`
-	Verdict         string `json:"verdict,omitempty"`
-	Summary         string `json:"summary,omitempty"`
-	Error           string `json:"error,omitempty"`
+	// Frame / Display 是画面几何：前人是「有内容的区域」（= 应用窗口），
+	// 后人是「录像的整幅像素」。两者不同就说明录像里有应当被裁掉的桌面。
+	Frame   *geometryDTO `json:"frame,omitempty"`
+	Display *geometryDTO `json:"display,omitempty"`
+	Verdict string       `json:"verdict,omitempty"`
+	Summary string       `json:"summary,omitempty"`
+	Error   string       `json:"error,omitempty"`
+}
+
+type geometryDTO struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+func toGeometry(r store.Rect) *geometryDTO {
+	if !r.Known() {
+		return nil
+	}
+	return &geometryDTO{X: r.X, Y: r.Y, Width: r.Width, Height: r.Height}
 }
 
 func toSessionDTO(s store.Session) sessionDTO {
@@ -146,6 +165,7 @@ func toSessionDTO(s store.Session) sessionDTO {
 		ID: s.ID, App: s.App, Ref: s.Ref, CommitSHA: s.CommitSHA, Status: string(s.Status),
 		CDPPort: s.CDPPort, VNCPort: s.VNCPort, VideoDurationMS: s.VideoDurationMS,
 		Verdict: s.Verdict, Summary: s.Summary, Error: s.Error,
+		Frame: toGeometry(s.Frame), Display: toGeometry(s.Display),
 		CreatedAt: s.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if !s.StartedAt.IsZero() {
@@ -228,7 +248,8 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.manager.Get(r.Context(), chi.URLParam(r, "id"))
+	// 旧录像没有几何元数据：这里顺手量一次并回填（只量一次，之后读库）
+	sess, err := s.manager.EnsureFrame(r.Context(), chi.URLParam(r, "id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -310,6 +331,21 @@ func (s *Server) serveVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, path)
+}
+
+// servePoster 录像的首帧静帧（视频封面）。
+//
+// 没有它，`<video preload="metadata">` 在按下播放之前就是一块黑屏——看的人无法判断
+// 这段录像里是什么。首帧从录像里抽，抽一次缓存到会话目录。
+func (s *Server) servePoster(w http.ResponseWriter, r *http.Request) {
+	path, err := s.manager.Poster(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	// 录像一旦收尾就不会变，可以放心让浏览器缓存
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 	http.ServeFile(w, r, path)
 }
 

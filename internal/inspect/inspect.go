@@ -192,9 +192,9 @@ func (c *Client) Press(ctx context.Context, key string) error {
 	return c.cdp.KeyPress(ctx, key)
 }
 
-// MaximizeWindow 让应用窗口铺满虚拟屏（高分辨率下避免四周空白）。
-func (c *Client) MaximizeWindow(ctx context.Context) error {
-	return c.cdp.MaximizeWindow(ctx)
+// Viewport 应用窗口内部的可绘制尺寸（用来校验窗口是否铺满虚拟屏）。
+func (c *Client) Viewport(ctx context.Context) (int, int, error) {
+	return c.cdp.Viewport(ctx)
 }
 
 // Evaluate 执行只读 JS 并返回原始 JSON。

@@ -8,6 +8,7 @@ package cdp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -170,29 +171,16 @@ func (c *Client) viewport(ctx context.Context) (float64, float64) {
 	return metrics.CSSLayoutViewport.ClientWidth, metrics.CSSLayoutViewport.ClientHeight
 }
 
-// MaximizeWindow 让应用窗口铺满虚拟屏。
+// Viewport 当前页面视口尺寸（= 应用窗口内可绘制区域）。
 //
-// 高分辨率下应用窗口默认尺寸不会自动变大，屏幕四周会留一大片空桌面——
-// 录屏和预览里那部分纯属浪费，所以这里显式最大化一次（失败只告警，不阻断会话）。
-func (c *Client) MaximizeWindow(ctx context.Context) error {
-	var target struct {
-		TargetID string `json:"targetId"`
+// 用它校验「窗口是不是真的铺满了虚拟屏」：录屏抓的是整个虚拟屏，
+// 窗口没铺满，录像里就只剩一角有内容。
+func (c *Client) Viewport(ctx context.Context) (int, int, error) {
+	w, h := c.viewport(ctx)
+	if w <= 0 || h <= 0 {
+		return 0, 0, errors.New("读不到页面视口尺寸")
 	}
-	if err := c.Call(ctx, "Browser.getWindowForTarget", nil, &target); err != nil {
-		return err
-	}
-	if target.TargetID == "" {
-		return nil
-	}
-	var window struct {
-		WindowID int `json:"windowId"`
-	}
-	if err := c.Call(ctx, "Browser.getWindowForTarget", nil, &window); err != nil {
-		return err
-	}
-	return c.Call(ctx, "Browser.setWindowBounds", map[string]any{
-		"windowId": window.WindowID, "bounds": map[string]any{"windowState": "maximized"},
-	}, nil)
+	return int(w), int(h), nil
 }
 
 // Call 发一个 CDP 命令并等结果。params 可以为 nil。

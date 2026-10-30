@@ -43,6 +43,34 @@ v0（`electron-acceptance-rig`）把 agent 塞进了容器，能用，但代价�
 关键点：容器用 `--network host`，调试端口直接落在宿主 loopback，
 所以 **CDP 由 Go 侧直接驱**，不需要在容器里塞 Node/Playwright。
 
+## 画面链路（取景 → 传输 → 显示）
+
+录像是这套东西的证据，所以「录什么」和「怎么看」是同一条链路上的两件事，必须一起设计：
+
+```
+容器：启动应用 → 铺满虚拟屏（rig-fit-window）→ 按窗口取景开录（rig-record）
+        ↓ logs/window.json（窗口矩形 + 虚拟屏尺寸）
+控制面：就绪时存进会话（frame / display）→ 旧录像首次打开时从像素里量一次并回填
+        ↓ GET /api/sessions/{id} 带上 frame+display；/poster 给首帧静帧
+管理台：ScreenStage 按 frame/display 裁剪 → 黑底等比显示，不裁变形、不铺一张大空白
+```
+
+几条不能反的顺序：
+
+- **先铺满，再开录**。录屏抓的是整个虚拟屏（这样弹窗、菜单、原生对话框都不会漏），
+  窗口没铺满就先开录，整段录像都会是「角落里一个小窗 + 一大片空桌面」。
+  铺满走容器内的 WM（`wmctrl`），不走 CDP：`Browser` 域只挂在浏览器端点上，
+  从页面目标发 `Browser.getWindowForTarget` 会直接报 `wasn't found`。
+- **就绪 = CDP 可达 + 取景已定 + 录屏已开**。容器落 `logs/ready.json` 之后才打 `READY`，
+  控制面等这个文件，否则前端会拿到一个还没开始录的会话（偏移量全是 -1）。
+- **铺不满也要有兜底**：应用拒绝最大化时，`rig-record` 会退化成「只抓窗口那一块」，
+  并把真实矩形写进 `window.json`；界面据 `frame != display` 裁剪并说明原因。
+- **旧录像不改文件**：裁剪是渲染层的变换（放大 `display/frame` 倍 + 平移），
+  录像本身一个字节不动，时间轴偏移量也不受影响。
+
+控制面需要 `ffmpeg` / `ffprobe` 在 PATH 上：用来给旧录像量画面区域、给录像抽首帧封面。
+没有也能跑，只是旧会话会按整幅画面显示、录像卡片是黑屏封面。
+
 ## 目录
 
 ```
@@ -80,6 +108,9 @@ make build        # 产出 bin/rigd（含前端）
   不假设某一个应用的页面结构或素材；文案里也不出现具体项目名。
 - 颜色只用语义 token（`bg-background` / `text-muted-foreground` / `bg-muted`…），
   状态色用 `success` / `warning` / `destructive` 这几个变体，不写 `text-emerald-600` 这类原始色值。
+- 画面一律走 `ScreenStage`（`web/src/components/screen-stage.tsx`），别直接铺 `<video>`/`<img>`：
+  它负责按 session 的 `frame`/`display` 裁剪、等比、黑底，换成别的写法就会退回
+  「白底一张大图、应用缩在角落」那种样子。
 
 ## 约定
 
