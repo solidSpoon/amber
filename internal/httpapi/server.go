@@ -112,9 +112,12 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}/artifacts/*", s.serveArtifact)
 		api.Get("/sessions/stream", s.streamSessions)
 		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
-		api.Get("/apps", s.apps)
 		api.Get("/machines", s.machines)
 		api.Get("/info", s.info)
+		api.Get("/payloads", s.listPayloads)
+		api.Post("/blobs/missing", s.missingBlobs)
+		api.Put("/blobs/{digest}", s.putBlob)
+		api.Post("/manifests", s.putManifest)
 		api.Get("/mcp", s.mcpInfo)
 		api.Get("/system/metrics", s.systemMetrics)
 		api.Get("/system/stream", s.streamSystem)
@@ -140,6 +143,9 @@ type sessionDTO struct {
 	IdleDeadline    string `json:"idleDeadline,omitempty"`
 	HasVideo        bool   `json:"hasVideo"`
 	VideoDurationMS int64  `json:"videoDurationMs"`
+	// Payload / Assets 是这次验的是哪份产物、挂了哪些素材
+	Payload string            `json:"payload,omitempty"`
+	Assets  map[string]string `json:"assets,omitempty"`
 	// Frame / Display 是画面几何：前人是「有内容的区域」（= 应用窗口），
 	// 后人是「录像的整幅像素」。两者不同就说明录像里有应当被裁掉的桌面。
 	Frame   *geometryDTO `json:"frame,omitempty"`
@@ -156,6 +162,18 @@ type geometryDTO struct {
 	Height int `json:"height"`
 }
 
+// decodeAssetsJSON 把库里存的槽位映射还原给前端（坏数据当空）。
+func decodeAssetsJSON(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	var assets map[string]string
+	if err := json.Unmarshal([]byte(raw), &assets); err != nil {
+		return nil
+	}
+	return assets
+}
+
 func toGeometry(r store.Rect) *geometryDTO {
 	if !r.Known() {
 		return nil
@@ -169,6 +187,7 @@ func toSessionDTO(s store.Session) sessionDTO {
 		CDPPort: s.CDPPort, VNCPort: s.VNCPort, VideoDurationMS: s.VideoDurationMS,
 		Verdict: s.Verdict, Summary: s.Summary, Error: s.Error,
 		Frame: toGeometry(s.Frame), Display: toGeometry(s.Display),
+		Payload: s.Payload, Assets: decodeAssetsJSON(s.Assets),
 		CreatedAt: s.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if !s.StartedAt.IsZero() {
@@ -208,8 +227,12 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 type createRequest struct {
-	App string `json:"app"`
-	Ref string `json:"ref"`
+	// Payload 被测产物：dir:/绝对路径 或 manifest:sha256:…
+	Payload string `json:"payload"`
+	// Assets 素材槽位 → 来源（槽位由产物自己的 rig.json 声明）
+	Assets map[string]string `json:"assets"`
+	Label  string            `json:"label"`
+	Commit string            `json:"commit"`
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -218,17 +241,16 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("请求体不是合法 JSON: %w", err))
 		return
 	}
-	if strings.TrimSpace(req.App) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("app 不能为空"))
+	if strings.TrimSpace(req.Payload) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("payload 不能为空"))
 		return
 	}
-	if req.Ref == "" {
-		req.Ref = "main"
-	}
 
-	// 起会话要 clone + 装依赖 + 构建 + 启动应用，动辄几分钟：
-	// 这里只做同步登记并立刻返回 202，真正的启动在后台跑，进度通过 SSE 推给前端。
-	sess, err := s.manager.Prepare(r.Context(), session.Options{App: req.App, Ref: req.Ref})
+	// 产物已经在 Prepare 里落地并校验过（入口、素材槽位），所以这里失败得快；
+	// 真正的启动仍然在后台跑，进度通过 SSE 推给前端。
+	sess, err := s.manager.Prepare(r.Context(), session.Options{
+		Label: req.Label, Payload: req.Payload, Assets: req.Assets, Commit: req.Commit,
+	})
 	if errors.Is(err, session.ErrTooManySessions) {
 		writeError(w, http.StatusTooManyRequests, err)
 		return
@@ -553,21 +575,6 @@ func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
-// apps 应用注册表：控制台据此渲染应用选择器，不在前端写死任何一个应用名。
-func (s *Server) apps(w http.ResponseWriter, _ *http.Request) {
-	entries := session.AppCatalog()
-	out := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, map[string]any{
-			"key":         entry.Key,
-			"name":        entry.Spec.Name,
-			"repo":        entry.Spec.Repo,
-			"description": entry.Spec.Description,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
-}
-
 // info 运行时信息：虚拟屏几何、并发上限等，看板据此画出与真实分辨率同比例的"显示器"。
 func (s *Server) info(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -579,8 +586,10 @@ func (s *Server) info(w http.ResponseWriter, _ *http.Request) {
 			"fps": s.cfg.Record.FPS,
 			"crf": s.cfg.Record.CRF,
 		},
-		"maxSessions": s.cfg.MaxSessions,
-		"idleTimeout": s.cfg.IdleTimeout.String(),
+		"maxSessions":    s.cfg.MaxSessions,
+		"idleTimeout":    s.cfg.IdleTimeout.String(),
+		"uploadLimitMB":  s.cfg.MaxUploadMB,
+		"workspaceRoots": s.cfg.WorkspaceRoots,
 	})
 }
 

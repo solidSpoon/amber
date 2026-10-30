@@ -11,7 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go sqlite 驱动，注册为 "sqlite"
@@ -76,6 +79,12 @@ type Session struct {
 	// Slot 占用的机器槽位（0..N-1），看板按槽位固定展示两台机器
 	Slot int
 	Dir  string
+	// Payload 被测产物的来源（dir:/… 或 manifest:sha256:…）
+	Payload string
+	// Assets 素材槽位 → 来源（JSON），槽位由产物的 rig.json 声明
+	Assets string
+	// Recipe 产物自述（rig.json 的原文快照），报告里能看出当时怎么启动的
+	Recipe string
 	// Frame 录像里真正有内容的那块区域（= 应用窗口），零值表示未知。
 	// Display 它所在的虚拟屏；两者不同就说明录进去的桌面比窗口大。
 	Frame           Rect
@@ -139,6 +148,8 @@ type Sample struct {
 // Store 封装数据库。所有方法都接受 context，便于 HTTP 请求取消时及时退出。
 type Store struct {
 	db *sql.DB
+	// blobRoot 内容寻址存储的根目录（<data>/blobs）；与 DB 同在一个数据目录下。
+	blobRoot string
 }
 
 // Open 打开（不存在则创建）数据库并执行迁移。
@@ -165,7 +176,22 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		}
 	}
 
-	s := &Store{db: db}
+	blobRoot := filepath.Join(filepath.Dir(dsn), "blobs")
+	if dsn == ":memory:" || strings.HasPrefix(dsn, "file:") {
+		// 内存库/临时库：放到系统临时目录，测试之间互不影响
+		root, err := os.MkdirTemp("", "rigd-blobs-")
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		blobRoot = root
+	}
+	if err := os.MkdirAll(filepath.Join(blobRoot, "tmp"), 0o755); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("创建 blob 目录失败: %w", err)
+	}
+
+	s := &Store{db: db, blobRoot: blobRoot}
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -254,11 +280,13 @@ func parseTime(v sql.NullString) time.Time {
 func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions
 		(id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+		 payload, assets, recipe,
 		 frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 		 created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.App, sess.Ref, sess.CommitSHA, sess.Image, sess.Container, string(sess.Status),
 		sess.CDPPort, sess.VNCPort, sess.Slot, sess.Dir,
+		sess.Payload, sess.Assets, sess.Recipe,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		sess.CreatedAt.UTC().Format(time.RFC3339Nano), formatTime(sess.StartedAt), formatTime(sess.EndedAt),
 		formatTime(sess.IdleDeadline), sess.VideoPath, sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error)
@@ -272,11 +300,13 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET
 		container = ?, status = ?, cdp_port = ?, vnc_port = ?,
+		payload = ?, assets = ?, recipe = ?,
 		frame_x = ?, frame_y = ?, frame_w = ?, frame_h = ?, display_w = ?, display_h = ?,
 		started_at = ?, ended_at = ?, idle_deadline = ?,
 		video_path = ?, video_duration_ms = ?, verdict = ?, summary = ?, error = ?, commit_sha = ?
 		WHERE id = ?`,
 		sess.Container, string(sess.Status), sess.CDPPort, sess.VNCPort,
+		sess.Payload, sess.Assets, sess.Recipe,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		formatTime(sess.StartedAt), formatTime(sess.EndedAt), formatTime(sess.IdleDeadline),
 		sess.VideoPath, sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error, sess.CommitSHA, sess.ID)
@@ -294,6 +324,7 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 var ErrNotFound = errors.New("记录不存在")
 
 const sessionColumns = `id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+	payload, assets, recipe,
 	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 	created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error`
 
@@ -306,6 +337,7 @@ func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 	)
 	err := sc.Scan(&sess.ID, &sess.App, &sess.Ref, &sess.CommitSHA, &sess.Image, &sess.Container, &status,
 		&sess.CDPPort, &sess.VNCPort, &sess.Slot, &sess.Dir,
+		&sess.Payload, &sess.Assets, &sess.Recipe,
 		&sess.Frame.X, &sess.Frame.Y, &sess.Frame.Width, &sess.Frame.Height,
 		&sess.Display.Width, &sess.Display.Height,
 		&createdAt, &startedAt, &endedAt, &idleDeadline,

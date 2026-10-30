@@ -24,12 +24,9 @@ type Config struct {
 	DataDir string
 	// Image 起会话用的容器镜像。
 	Image string
-	// ModelsDir 预置模型目录（宿主机），只读挂到容器 /assets/models。
-	// 需要离线推理的应用（如 DashPlayer 的本地翻译）靠它避免会话内下载。
-	ModelsDir string
-	// MediaDir 验收素材目录（宿主机），只读挂到容器 /assets。
-	// 需要媒体素材的应用（如播放器）必须配置它，否则起会话时直接报错。
-	MediaDir string
+	// WorkspaceRoots 允许作为 dir:/ 直接挂载进容器的宿主目录白名单。
+	// 为空表示禁用 dir 来源（只能用上传的 manifest）——默认就该是关的。
+	WorkspaceRoots []string
 	// DockerBin docker 可执行文件路径，便于测试替换。
 	DockerBin string
 	// MaxSessions 同时允许运行的会话数；超出直接拒绝，而不是排队等待。
@@ -45,6 +42,10 @@ type Config struct {
 	Display DisplayConfig
 	// Record 录屏参数。
 	Record RecordConfig
+	// PayloadTTL 没人引用的产物/素材保留多久（回收兜底）。会话结束会立刻归还引用。
+	PayloadTTL time.Duration
+	// MaxUploadMB 单个 blob 的上传上限（MB）。产物再大也不该走"一个 4GB 的 tar"。
+	MaxUploadMB int
 	// SampleInterval 指标采样间隔。
 	SampleInterval time.Duration
 	// LogLevel 日志级别。
@@ -77,13 +78,14 @@ func Load() (*Config, error) {
 		DataDir:        env("RIGD_DATA_DIR", defaultDataDir()),
 		Image:          env("RIGD_IMAGE", "electron-acceptance-rig:latest"),
 		DockerBin:      env("RIGD_DOCKER", "docker"),
-		MediaDir:       env("RIGD_MEDIA_DIR", ""),
-		ModelsDir:      env("RIGD_MODELS_DIR", ""),
+		WorkspaceRoots: envList("RIGD_WORKSPACE_ROOTS", ":"),
 		MaxSessions:    envInt("RIGD_MAX_SESSIONS", 2),
 		IdleTimeout:    envDuration("RIGD_IDLE_TIMEOUT", 10*time.Minute),
 		MaxLifetime:    envDuration("RIGD_MAX_LIFETIME", 40*time.Minute),
 		CDPPortBase:    envInt("RIGD_CDP_PORT_BASE", 9222),
 		VNCPortBase:    envInt("RIGD_VNC_PORT_BASE", 6080),
+		PayloadTTL:     envDuration("RIGD_PAYLOAD_TTL", 24*time.Hour),
+		MaxUploadMB:    envInt("RIGD_MAX_UPLOAD_MB", 2048),
 		SampleInterval: envDuration("RIGD_SAMPLE_INTERVAL", 5*time.Second),
 		MCPToken:       env("RIGD_MCP_TOKEN", ""),
 		LogLevel:       envLogLevel("RIGD_LOG_LEVEL", slog.LevelInfo),
@@ -98,6 +100,9 @@ func Load() (*Config, error) {
 		},
 	}
 
+	if cfg.MaxUploadMB < 1 {
+		return nil, fmt.Errorf("RIGD_MAX_UPLOAD_MB 必须 >= 1，收到 %d", cfg.MaxUploadMB)
+	}
 	if cfg.MaxSessions < 1 {
 		return nil, fmt.Errorf("RIGD_MAX_SESSIONS 必须 >= 1，收到 %d", cfg.MaxSessions)
 	}
@@ -153,6 +158,22 @@ func defaultDataDir() string {
 		return filepath.Join(dir, "rigd")
 	}
 	return "./rigd-data"
+}
+
+// envList 读冒号/逗号分隔的路径列表。
+func envList(key, sep string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return string(r) == sep || r == ',' })
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func env(key, fallback string) string {

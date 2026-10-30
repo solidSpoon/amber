@@ -52,8 +52,12 @@ func NewServer(mgr *session.Manager, log *slog.Logger) *mcp.Server {
 // ---- 会话管理 -------------------------------------------------------------
 
 type startArgs struct {
-	App string `json:"app" jsonschema:"被测应用标识，例如 DashPlayer"`
-	Ref string `json:"ref,omitempty" jsonschema:"代码版本：分支名或 commit，默认 main"`
+	// Payload 被测产物：同机用 dir:/绝对路径；跨机先 POST /api/blobs + /api/manifests，再传 manifest:sha256:…
+	Payload string `json:"payload" jsonschema:"被测产物：dir:/绝对路径 或 manifest:sha256:…（必填）"`
+	// Assets 产物 rig.json 里声明的素材槽位 → 来源
+	Assets map[string]string `json:"assets,omitempty" jsonschema:"素材槽位映射，槽位由产物 rig.json 声明"`
+	Label  string            `json:"label,omitempty" jsonschema:"展示名；留空用产物 rig.json 里的 name"`
+	Commit string            `json:"commit,omitempty" jsonschema:"可选的来源版本号，只用于报告溯源"`
 }
 
 type startResult struct {
@@ -70,13 +74,12 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 		Description: "申请一台一次性测试机：拉起容器、构建并启动被测应用、开始全程录屏。" +
 			"返回 sessionId，之后所有操作都要带上它。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args startArgs) (*mcp.CallToolResult, startResult, error) {
-		if strings.TrimSpace(args.App) == "" {
-			return nil, startResult{}, errors.New("app 不能为空")
+		if strings.TrimSpace(args.Payload) == "" {
+			return nil, startResult{}, errors.New("payload 不能为空（dir:/绝对路径 或 manifest:sha256:…）")
 		}
-		if args.Ref == "" {
-			args.Ref = "main"
-		}
-		sess, err := s.manager.Start(ctx, session.Options{App: args.App, Ref: args.Ref})
+		sess, err := s.manager.Start(ctx, session.Options{
+			Label: args.Label, Payload: args.Payload, Assets: args.Assets, Commit: args.Commit,
+		})
 		if err != nil {
 			return nil, startResult{}, err
 		}

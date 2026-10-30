@@ -16,10 +16,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
-	"net"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -117,12 +118,27 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 			HTTPURL: mcpURL, Token: token, HTTPEnabled: true, Tools: mcpTools,
 			Command: []string{"rigd", "--mcp"},
 			Env: map[string]string{
-				"RIGD_DATA_DIR":  cfg.DataDir,
-				"RIGD_IMAGE":     cfg.Image,
-				"RIGD_MEDIA_DIR": cfg.MediaDir,
+				"RIGD_DATA_DIR":        cfg.DataDir,
+				"RIGD_IMAGE":           cfg.Image,
+				"RIGD_WORKSPACE_ROOTS": strings.Join(cfg.WorkspaceRoots, ":"),
 			},
 		},
 	})
+
+	// 产物回收：会话结束会立刻归还引用；这里兜住进程被杀、上传传一半留下的垃圾。
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			freed, err := st.Sweep(context.Background(), cfg.PayloadTTL)
+			if err != nil {
+				logger.Warn("回收产物失败", "err", err)
+			} else if freed > 0 {
+				logger.Info("已回收无人引用的产物", "freed_mb", freed>>20)
+			}
+			<-ticker.C
+		}
+	}()
 
 	router := api.Handler()
 	mux := http.NewServeMux()

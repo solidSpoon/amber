@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -38,7 +39,7 @@ func (fakeDocker) Exec(context.Context, string, ...string) (string, error) {
 }
 func (fakeDocker) CountRunning(context.Context, string) (int, error) { return 1, nil }
 func (fakeDocker) Logs(context.Context, string, int) (string, error) { return "app log line\n", nil }
-func (fakeDocker) Remove(context.Context, string) error            { return nil }
+func (fakeDocker) Remove(context.Context, string) error              { return nil }
 func (fakeDocker) Stats(context.Context, string) (dockerx.Stats, error) {
 	return dockerx.Stats{CPUPct: 12.5, MemUsed: 200 << 20, MemLimit: 2 << 30}, nil
 }
@@ -51,10 +52,10 @@ type fakeInspector struct {
 func (f *fakeInspector) Snapshot(context.Context) (inspect.Snapshot, error) {
 	return inspect.Snapshot{URL: "file:///app/index.html", Title: "t", Text: "hello"}, nil
 }
-func (f *fakeInspector) Click(context.Context, string) error            { return nil }
+func (f *fakeInspector) Click(context.Context, string) error             { return nil }
 func (f *fakeInspector) ClickAt(context.Context, float64, float64) error { return nil }
-func (f *fakeInspector) Fill(context.Context, string, string) error     { return nil }
-func (f *fakeInspector) Press(context.Context, string) error            { return nil }
+func (f *fakeInspector) Fill(context.Context, string, string) error      { return nil }
+func (f *fakeInspector) Press(context.Context, string) error             { return nil }
 func (f *fakeInspector) Evaluate(context.Context, string) (json.RawMessage, error) {
 	return json.RawMessage(`{"currentTime":5.5}`), nil
 }
@@ -80,9 +81,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *session.Manager) {
 		DataDir: dir, Image: "rig-test:latest", MaxSessions: 2,
 		IdleTimeout: time.Minute, MaxLifetime: time.Hour,
 		CDPPortBase: 29222, VNCPortBase: 26080,
-		Display: config.DisplayConfig{Width: 1280, Height: 800},
-		Record:  config.RecordConfig{FPS: 20, CRF: 26},
-		MediaDir: dir,
+		Display:        config.DisplayConfig{Width: 1280, Height: 800},
+		Record:         config.RecordConfig{FPS: 20, CRF: 26},
+		WorkspaceRoots: []string{os.TempDir()},
 	}
 	if err := os.MkdirAll(cfg.SessionsDir(), 0o755); err != nil {
 		t.Fatalf("创建会话目录失败: %v", err)
@@ -104,6 +105,23 @@ func newTestServer(t *testing.T) (*httptest.Server, *session.Manager) {
 	srv := httptest.NewServer(New(Options{Config: cfg, Store: st, Manager: mgr, WebFS: webFS, Log: log}).Handler())
 	t.Cleanup(srv.Close)
 	return srv, mgr
+}
+
+// testPayload 造一个最小可运行产物目录（入口 + rig.json），返回 dir:/… 形式的来源。
+func testPayload(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "demo-app")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("创建产物目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("写入口失败: %v", err)
+	}
+	recipe := `{"name":"demo","entry":"run.sh","ready":{"cdp":9222}}`
+	if err := os.WriteFile(filepath.Join(dir, "rig.json"), []byte(recipe), 0o644); err != nil {
+		t.Fatalf("写 rig.json 失败: %v", err)
+	}
+	return "dir:" + dir
 }
 
 func postJSON(t *testing.T, url string, body any) (*http.Response, map[string]any) {
@@ -147,7 +165,7 @@ func TestHealthz(t *testing.T) {
 func TestCreateListStopSession(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	resp, created := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "DashPlayer", "ref": "feat/x"})
+	resp, created := postJSON(t, srv.URL+"/api/sessions", map[string]any{"payload": testPayload(t), "commit": "feat/x"})
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("创建会话期望 202，实际 %d: %v", resp.StatusCode, created)
 	}
@@ -193,11 +211,11 @@ func TestCreateSessionRequiresApp(t *testing.T) {
 func TestCreateSessionTooMany(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for i := 0; i < 2; i++ {
-		if resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "sample"}); resp.StatusCode != http.StatusAccepted {
+		if resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"payload": testPayload(t)}); resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("第 %d 个会话应成功: %v", i+1, body)
 		}
 	}
-	resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "sample"})
+	resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"payload": testPayload(t)})
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("期望 429，实际 %d: %v", resp.StatusCode, body)
 	}

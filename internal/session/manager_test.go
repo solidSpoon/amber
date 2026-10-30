@@ -120,17 +120,36 @@ func (f *fakeInspector) PreviewJPEG(context.Context, int) ([]byte, error) {
 
 func (f *fakeInspector) Close() error { return nil }
 
+// writeTestPayload 造一个最小可运行产物：一个可执行入口 + rig.json。
+func writeTestPayload(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("创建产物目录失败: %v", err)
+	}
+	entry := filepath.Join(dir, "run.sh")
+	if err := os.WriteFile(entry, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
+		t.Fatalf("写入口失败: %v", err)
+	}
+	recipe := `{"name":"` + name + `","entry":"run.sh","args":["--no-sandbox"],"env":{"LANG":"zh_CN.UTF-8"},` +
+		`"ready":{"cdp":9222},"assets":[{"name":"media","path":"/library"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "rig.json"), []byte(recipe), 0o644); err != nil {
+		t.Fatalf("写 rig.json 失败: %v", err)
+	}
+	return dir
+}
+
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
 	dir := t.TempDir()
+	// 测试里把临时目录设成允许挂载的根，模拟 RIGD_WORKSPACE_ROOTS
 	cfg := &config.Config{
 		Addr: "127.0.0.1:0", DataDir: dir, Image: "rig-test:latest", DockerBin: "docker",
 		MaxSessions: 2, IdleTimeout: time.Minute, MaxLifetime: time.Hour,
 		CDPPortBase: 19222, VNCPortBase: 16080,
-		Display: config.DisplayConfig{Width: 1280, Height: 800},
-		Record:  config.RecordConfig{FPS: 20, CRF: 26},
-		// 测试里给一个存在的目录，模拟已配置的验收素材
-		MediaDir: dir,
+		Display:        config.DisplayConfig{Width: 1280, Height: 800},
+		Record:         config.RecordConfig{FPS: 20, CRF: 26},
+		WorkspaceRoots: []string{os.TempDir()},
 	}
 	if err := os.MkdirAll(cfg.SessionsDir(), 0o755); err != nil {
 		t.Fatalf("创建会话根目录失败: %v", err)
@@ -159,7 +178,7 @@ func TestStartLaunchesContainerAndBecomesReady(t *testing.T) {
 	ctx := context.Background()
 	m, st, fake, _ := newTestManager(t)
 
-	sess, err := m.Start(ctx, Options{App: "sample", Ref: ""})
+	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "sample")})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -182,9 +201,12 @@ func TestStartLaunchesContainerAndBecomesReady(t *testing.T) {
 	if spec.Env["RIG_DEBUG_PORT"] != itoa(sess.CDPPort) {
 		t.Fatalf("调试端口未注入: %v", spec.Env)
 	}
-	// /out 必须有；配置了素材目录时会多挂一个只读的 /assets
-	if len(spec.Mounts) == 0 || spec.Mounts[0].ContainerPath != "/out" {
-		t.Fatalf("必须挂载 /out: %+v", spec.Mounts)
+	// /out 可写；/app 必须是只读的产物挂载
+	if len(spec.Mounts) < 2 || spec.Mounts[0].ContainerPath != "/out" {
+		t.Fatalf("必须挂载 /out 与 /app: %+v", spec.Mounts)
+	}
+	if spec.Mounts[1].ContainerPath != "/app" || !spec.Mounts[1].ReadOnly {
+		t.Fatalf("产物必须只读挂到 /app: %+v", spec.Mounts[1])
 	}
 
 	// 会话目录与录像目录要提前建好，容器才有地方写
@@ -202,13 +224,13 @@ func TestStartRejectsBeyondMaxSessions(t *testing.T) {
 	ctx := context.Background()
 	m, _, _, _ := newTestManager(t)
 
-	if _, err := m.Start(ctx, Options{App: "sample"}); err != nil {
+	if _, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "sample")}); err != nil {
 		t.Fatalf("第 1 个会话应成功: %v", err)
 	}
-	if _, err := m.Start(ctx, Options{App: "sample"}); err != nil {
+	if _, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "sample")}); err != nil {
 		t.Fatalf("第 2 个会话应成功: %v", err)
 	}
-	if _, err := m.Start(ctx, Options{App: "sample"}); !errors.Is(err, ErrTooManySessions) {
+	if _, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "sample")}); !errors.Is(err, ErrTooManySessions) {
 		t.Fatalf("第 3 个会话应被拒绝，实际 %v", err)
 	}
 }
@@ -218,7 +240,7 @@ func TestRecordWritesAuditWithVideoOffset(t *testing.T) {
 	ctx := context.Background()
 	m, st, _, insp := newTestManager(t)
 
-	sess, err := m.Start(ctx, Options{App: "sample", Ref: ""})
+	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "sample")})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -256,7 +278,7 @@ func TestRecordWritesAuditWithVideoOffset(t *testing.T) {
 func TestRecordLogsFailedToolCall(t *testing.T) {
 	ctx := context.Background()
 	m, st, _, _ := newTestManager(t)
-	sess, err := m.Start(ctx, Options{App: "DashPlayer"})
+	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "dashplayer")})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -282,7 +304,7 @@ func TestRecordLogsFailedToolCall(t *testing.T) {
 func TestStopFinalizesSessionAndRegistersVideo(t *testing.T) {
 	ctx := context.Background()
 	m, st, fake, _ := newTestManager(t)
-	sess, err := m.Start(ctx, Options{App: "DashPlayer"})
+	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "dashplayer")})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -326,7 +348,7 @@ func TestStopFinalizesSessionAndRegistersVideo(t *testing.T) {
 func TestSweepReclaimsIdleSession(t *testing.T) {
 	ctx := context.Background()
 	m, st, fake, _ := newTestManager(t)
-	sess, err := m.Start(ctx, Options{App: "DashPlayer"})
+	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "dashplayer")})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -357,7 +379,7 @@ func TestSweepReclaimsIdleSession(t *testing.T) {
 func TestStopIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	m, _, _, _ := newTestManager(t)
-	sess, err := m.Start(ctx, Options{App: "DashPlayer"})
+	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "dashplayer")})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -385,38 +407,75 @@ func fmtInt(n int) string {
 	return string(digits)
 }
 
-// 应用注册表决定容器里拿到哪些环境变量；配错了容器会起不来，所以单独钉一条。
-func TestStartInjectsAppContract(t *testing.T) {
+// 契约来自产物自己的 rig.json：入口、参数、环境变量、素材槽位都要原样进容器。
+func TestStartInjectsPayloadContract(t *testing.T) {
 	ctx := context.Background()
 	m, _, fake, _ := newTestManager(t)
+	payloadDir := writeTestPayload(t, "demo")
 
-	if _, err := m.Start(ctx, Options{App: "DashPlayer", Ref: "feat/x"}); err != nil {
+	mediaDir := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		t.Fatalf("创建素材目录失败: %v", err)
+	}
+	if _, err := m.Start(ctx, Options{
+		Payload: "dir:" + payloadDir,
+		Assets:  map[string]string{"media": "dir:" + mediaDir},
+	}); err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
-	env := fake.runSpecs[0].Env
+	spec := fake.runSpecs[0]
 	want := map[string]string{
-		"RIG_GIT_URL":      "https://github.com/solidSpoon/DashPlayer.git",
-		"RIG_GIT_REF":      "feat/x",
-		"RIG_APP_DIR":      "/app",
-		"RIG_BUILD_SCRIPT": "/opt/apps/dashplayer/build.sh",
-		"RIG_BOOTSTRAP":    "/opt/apps/dashplayer/bootstrap.mjs",
-		"RIG_APP_NAME":     "DashPlayer",
+		"RIG_APP_DIR":   "/app",
+		"RIG_ENTRY":     "run.sh",
+		"RIG_ARGS":      `["--no-sandbox"]`,
+		"RIG_READY_CDP": "9222",
+		"RIG_APP_NAME":  "demo",
+		"LANG":          "zh_CN.UTF-8",
 	}
 	for key, value := range want {
-		if env[key] != value {
-			t.Fatalf("%s 期望 %q，实际 %q", key, value, env[key])
+		if spec.Env[key] != value {
+			t.Fatalf("%s 期望 %q，实际 %q", key, value, spec.Env[key])
 		}
+	}
+	var hasMedia bool
+	for _, mount := range spec.Mounts {
+		if mount.ContainerPath == "/library" && mount.ReadOnly && mount.Source == mediaDir {
+			hasMedia = true
+		}
+	}
+	if !hasMedia {
+		t.Fatalf("素材槽位没有挂到 /library: %+v", spec.Mounts)
 	}
 }
 
-// 未知应用必须启动前就报错，不能悄悄起一个空容器。
-func TestStartRejectsUnknownApp(t *testing.T) {
+// 产物声明的必需槽位没给，必须在起容器之前就失败。
+func TestStartRejectsMissingRequiredAsset(t *testing.T) {
 	ctx := context.Background()
 	m, _, fake, _ := newTestManager(t)
-	if _, err := m.Start(ctx, Options{App: "不存在的应用"}); err == nil {
-		t.Fatal("未知应用应报错")
+	dir := filepath.Join(t.TempDir(), "needy")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "run.sh"), []byte("#!/bin/sh\n"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "rig.json"),
+		[]byte(`{"entry":"run.sh","assets":[{"name":"media","path":"/library","required":true}]}`), 0o644)
+
+	if _, err := m.Start(ctx, Options{Payload: "dir:" + dir}); err == nil {
+		t.Fatal("缺少必需槽位应报错")
 	}
 	if len(fake.runSpecs) != 0 {
-		t.Fatalf("未知应用不应启动容器: %v", fake.runSpecs)
+		t.Fatalf("校验失败时不应起容器: %v", fake.runSpecs)
+	}
+}
+
+// 白名单外的目录必须拒绝：dir 来源等于"给我跑宿主上的这个目录"。
+func TestStartRejectsPathOutsideWorkspace(t *testing.T) {
+	ctx := context.Background()
+	m, _, fake, _ := newTestManager(t)
+	if _, err := m.Start(ctx, Options{Payload: "dir:/etc"}); err == nil {
+		t.Fatal("白名单外的路径应报错")
+	}
+	if len(fake.runSpecs) != 0 {
+		t.Fatalf("校验失败时不应起容器: %v", fake.runSpecs)
 	}
 }

@@ -1,0 +1,359 @@
+package session
+
+// payload.go：输入物是「可运行的产物」，不是「仓库 + 分支」。
+//
+// 两种来源：
+//   dir:/abs/path      宿主目录，只读挂载（同机、体积大、零拷贝）
+//   manifest:sha256:…  已上传的目录树，从内容寻址库里物化出来（跨机、可复现）
+//
+// 应用自述（rig.json，可选）告诉容器怎么启动、怎么算就绪、需要哪些素材槽位。
+// 控制面只认识「路径 / 名字 / sha256」，不认识"模型""素材"这种业务概念——这就是项目中立。
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/solidSpoon/rigd/internal/store"
+)
+
+// Recipe 是产物根目录下 rig.json 的内容（没有也能跑，靠约定猜入口）。
+type Recipe struct {
+	Name  string            `json:"name"`
+	Entry string            `json:"entry"`
+	Args  []string          `json:"args"`
+	Env   map[string]string `json:"env"`
+	Ready ReadySpec         `json:"ready"`
+	// Assets 声明"我需要哪些外部目录"。槽位名由应用自己起，rigd 不解释含义。
+	Assets []AssetSlot `json:"assets"`
+}
+
+// ReadySpec 怎么算"应用起来了、可以开始操作了"。
+type ReadySpec struct {
+	// CDP 调试端口（Electron/Chromium 系）；0 表示只看窗口是否出现
+	CDP        int `json:"cdp"`
+	TimeoutSec int `json:"timeoutSec"`
+}
+
+// AssetSlot 一个素材槽位：挂到容器里的哪个路径。
+type AssetSlot struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Required bool   `json:"required"`
+	// Env 可选：把挂载路径写进这个环境变量，免得应用找不到
+	Env string `json:"env"`
+}
+
+// Source 一个输入物的来源。
+type Source struct {
+	Kind string // dir | manifest
+	// Path 宿主目录（Kind=dir）
+	Path string
+	// Digest 已上传的目录树（Kind=manifest，裸 hex）
+	Digest string
+	// Raw 调用方原始写法，错误信息里原样回显
+	Raw string
+}
+
+// ParseSource 解析 "dir:/abs" / "manifest:sha256:…"。
+func ParseSource(raw string) (Source, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return Source{}, errors.New("来源不能为空")
+	}
+	if rest, ok := strings.CutPrefix(value, "dir:"); ok {
+		path := filepath.Clean(strings.TrimSpace(rest))
+		if !filepath.IsAbs(path) {
+			return Source{}, fmt.Errorf("dir 来源必须是绝对路径：%q", raw)
+		}
+		return Source{Kind: "dir", Path: path, Raw: value}, nil
+	}
+	if rest, ok := strings.CutPrefix(value, "manifest:"); ok {
+		digest, err := store.NormalizeDigest(rest)
+		if err != nil {
+			return Source{}, err
+		}
+		return Source{Kind: "manifest", Digest: digest, Raw: value}, nil
+	}
+	return Source{}, fmt.Errorf("无法识别的来源 %q（支持 dir:/绝对路径 或 manifest:sha256:…）", raw)
+}
+
+// payloadInput 解析后的产物：宿主机上的一个目录 + 它的自述。
+type payloadInput struct {
+	Source Source
+	// Dir 该目录在宿主上的真实位置（dir 来源 = 原目录；manifest 来源 = 物化出来的目录）
+	Dir    string
+	Recipe Recipe
+	// Entry 相对 Dir 的可执行文件
+	Entry string
+	// Mount 需要额外挂载的素材：槽位 → 宿主目录
+	Assets []assetMount
+}
+
+type assetMount struct {
+	Slot AssetSlot
+	Dir  string
+	Kind string
+	Key  string // manifest digest（用于引用计数）
+}
+
+// resolvePayload 校验来源、物化产物、读自述、确定入口。
+func (m *Manager) resolvePayload(ctx context.Context, dir, raw string, assets map[string]string) (payloadInput, error) {
+	src, err := ParseSource(raw)
+	if err != nil {
+		return payloadInput{}, err
+	}
+
+	input := payloadInput{Source: src}
+	if src.Kind == "dir" {
+		if err := m.checkWorkspacePath(src.Path); err != nil {
+			return payloadInput{}, err
+		}
+		info, statErr := os.Stat(src.Path)
+		if statErr != nil || !info.IsDir() {
+			return payloadInput{}, fmt.Errorf("产物目录不存在：%s", src.Path)
+		}
+		input.Dir = src.Path
+	} else {
+		manifest, err := m.store.GetManifest(ctx, src.Digest)
+		if err != nil {
+			return payloadInput{}, fmt.Errorf("产物 manifest 不存在：%w", err)
+		}
+		input.Dir = filepath.Join(dir, "payload")
+		if err := m.materialize(manifest, input.Dir); err != nil {
+			return payloadInput{}, err
+		}
+	}
+
+	if input.Recipe, err = readRecipe(input.Dir); err != nil {
+		return payloadInput{}, err
+	}
+	if input.Entry, err = resolveEntry(input.Dir, input.Recipe); err != nil {
+		return payloadInput{}, err
+	}
+
+	input.Assets, err = m.resolveAssets(ctx, dir, input.Recipe.Assets, assets)
+	if err != nil {
+		return payloadInput{}, err
+	}
+	return input, nil
+}
+
+// checkWorkspacePath 只允许挂载配置里认可的根目录：防止"给我跑一下 /etc"。
+func (m *Manager) checkWorkspacePath(path string) error {
+	roots := m.cfg.WorkspaceRoots
+	if len(roots) == 0 {
+		return errors.New("未配置 RIGD_WORKSPACE_ROOTS，dir 来源已禁用（请改用 manifest:… 上传产物）")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		if rel, err := filepath.Rel(rootAbs, abs); err == nil && !strings.HasPrefix(rel, "..") {
+			return nil
+		}
+	}
+	return fmt.Errorf("路径 %s 不在允许的目录范围内（RIGD_WORKSPACE_ROOTS）", abs)
+}
+
+// materialize 把目录树从内容寻址库里"铺"出来。
+//
+// 用硬链接而不是复制：1.3GB 的产物铺出来是零拷贝、毫秒级；blob 本身只读，
+// 不会被会话写坏（会话里挂的是只读挂载）。
+func (m *Manager) materialize(manifest store.Manifest, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("创建产物目录失败: %w", err)
+	}
+	for _, entry := range manifest.Entries {
+		target := filepath.Join(dst, entry.Path)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("创建目录失败: %w", err)
+		}
+		if err := m.linkOrCopy(m.store.BlobPath(entry.Digest), target); err != nil {
+			return fmt.Errorf("铺开 %s 失败: %w", entry.Path, err)
+		}
+		mode := os.FileMode(0o644)
+		if entry.Mode&0o111 != 0 {
+			mode = 0o755
+		}
+		_ = os.Chmod(target, mode)
+	}
+	return nil
+}
+
+func (m *Manager) linkOrCopy(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	// 跨文件系统（blob 在别的挂载点上）时退化成复制
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// readRecipe 读产物根目录的 rig.json；没有就是空自述（靠约定猜）。
+func readRecipe(dir string) (Recipe, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "rig.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return Recipe{}, nil
+	}
+	if err != nil {
+		return Recipe{}, fmt.Errorf("读 rig.json 失败: %w", err)
+	}
+	var recipe Recipe
+	if err := json.Unmarshal(raw, &recipe); err != nil {
+		return Recipe{}, fmt.Errorf("解析 rig.json 失败: %w", err)
+	}
+	for _, slot := range recipe.Assets {
+		if slot.Name == "" || !filepath.IsAbs(slot.Path) {
+			return Recipe{}, fmt.Errorf("rig.json 里的素材槽位必须同时给 name 和绝对 path：%+v", slot)
+		}
+	}
+	if recipe.Ready.TimeoutSec <= 0 {
+		recipe.Ready.TimeoutSec = 60
+	}
+	return recipe, nil
+}
+
+// resolveEntry 确定启动哪个文件：自述优先，否则按常见约定猜（猜不到就明确报错）。
+func resolveEntry(dir string, recipe Recipe) (string, error) {
+	if recipe.Entry != "" {
+		entry := strings.TrimPrefix(filepath.Clean(recipe.Entry), "/")
+		info, err := os.Stat(filepath.Join(dir, entry))
+		if err != nil {
+			return "", fmt.Errorf("rig.json 指定的入口不存在：%s", recipe.Entry)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("rig.json 指定的入口是目录：%s", recipe.Entry)
+		}
+		return entry, nil
+	}
+
+	guesses := []string{"AppRun", "start.sh", "run.sh"}
+	for _, guess := range guesses {
+		if info, err := os.Stat(filepath.Join(dir, guess)); err == nil && !info.IsDir() {
+			return guess, nil
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("读产物目录失败: %w", err)
+	}
+	var executables, appImages []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".AppImage") {
+			appImages = append(appImages, e.Name())
+		} else if info.Mode()&0o111 != 0 {
+			executables = append(executables, e.Name())
+		}
+	}
+	sort.Strings(executables)
+	sort.Strings(appImages)
+	switch {
+	case len(appImages) == 1:
+		return appImages[0], nil
+	case len(executables) == 1:
+		return executables[0], nil
+	}
+	return "", errors.New("产物根目录找不到唯一入口，请在 rig.json 里写明 entry")
+}
+
+// resolveAssets 把调用方给的素材来源对到产物声明的槽位上。
+func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []AssetSlot, provided map[string]string) ([]assetMount, error) {
+	byName := make(map[string]AssetSlot, len(slots))
+	for _, slot := range slots {
+		byName[slot.Name] = slot
+	}
+	for name := range provided {
+		if _, ok := byName[name]; !ok {
+			return nil, fmt.Errorf("产物没有声明素材槽位 %q（可用：%v）", name, slotNames(slots))
+		}
+	}
+
+	mounts := make([]assetMount, 0, len(slots))
+	for _, slot := range slots {
+		raw, ok := provided[slot.Name]
+		if !ok || strings.TrimSpace(raw) == "" {
+			if slot.Required {
+				return nil, fmt.Errorf("缺少必需素材槽位 %q（挂载点 %s）", slot.Name, slot.Path)
+			}
+			continue
+		}
+		src, err := ParseSource(raw)
+		if err != nil {
+			return nil, fmt.Errorf("素材 %q：%w", slot.Name, err)
+		}
+		mount := assetMount{Slot: slot}
+		switch src.Kind {
+		case "dir":
+			if err := m.checkWorkspacePath(src.Path); err != nil {
+				return nil, err
+			}
+			if info, err := os.Stat(src.Path); err != nil || !info.IsDir() {
+				return nil, fmt.Errorf("素材目录不存在：%s", src.Path)
+			}
+			mount.Dir, mount.Kind = src.Path, "dir"
+		case "manifest":
+			manifest, err := m.store.GetManifest(ctx, src.Digest)
+			if err != nil {
+				return nil, fmt.Errorf("素材 %q 的 manifest 不存在：%w", slot.Name, err)
+			}
+			mount.Dir = filepath.Join(sessionDir, "assets", slot.Name)
+			if err := m.materialize(manifest, mount.Dir); err != nil {
+				return nil, err
+			}
+			mount.Kind, mount.Key = "manifest", src.Digest
+		}
+		mounts = append(mounts, mount)
+	}
+	return mounts, nil
+}
+
+func slotNames(slots []AssetSlot) []string {
+	names := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		names = append(names, slot.Name)
+	}
+	return names
+}
+
+// decodeAssets 把库里存的 JSON 还原成槽位映射（坏数据返回空表，不 panic）。
+func decodeAssets(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var assets map[string]string
+	if err := json.Unmarshal([]byte(raw), &assets); err != nil {
+		return nil
+	}
+	return assets
+}

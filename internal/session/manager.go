@@ -78,10 +78,14 @@ type liveSession struct {
 
 // Options 创建会话的输入。
 type Options struct {
-	// App 应用标识（对应容器镜像里的应用适配脚本）。
-	App string
-	// Ref 代码版本：分支名或 commit。空表示镜像内置应用。
-	Ref string
+	// Label 展示名（一般是产物 rig.json 里的 name）；留空时用产物目录名
+	Label string
+	// Payload 被测产物：dir:/绝对路径 或 manifest:sha256:…
+	Payload string
+	// Assets 素材槽位 → 来源（槽位由产物自己的 rig.json 声明）
+	Assets map[string]string
+	// Commit 可选的来源版本号，只用于报告溯源
+	Commit string
 }
 
 // NewManager 构造调度器。
@@ -124,13 +128,8 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 	}
 	m.mu.Unlock()
 
-	spec, err := LookupApp(opts.App)
-	if err != nil {
-		return store.Session{}, err
-	}
-	// 素材缺失要在起容器之前就失败，别等到构建脚本 cp 才报 ENOENT
-	if spec.RequiresMedia && m.cfg.MediaDir == "" {
-		return store.Session{}, fmt.Errorf("应用 %s 需要验收素材，但未配置 RIGD_MEDIA_DIR", opts.App)
+	if strings.TrimSpace(opts.Payload) == "" {
+		return store.Session{}, errors.New("必须指定 payload（dir:/绝对路径 或 manifest:sha256:…）")
 	}
 
 	// 槽位 = 看板上的机器位置，固定 0..MaxSessions-1；占满则拒绝
@@ -157,6 +156,14 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 		}
 	}
 
+	// 先把产物落地、读自述、对素材槽位：这些都在起容器之前做完，
+	// 配错了立刻失败，而不是让容器跑到一半才发现入口不存在。
+	payload, err := m.resolvePayload(ctx, dir, opts.Payload, opts.Assets)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return store.Session{}, err
+	}
+
 	cdpPort, err := pickFreePort(m.cfg.CDPPortBase)
 	if err != nil {
 		return store.Session{}, err
@@ -166,23 +173,79 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 		return store.Session{}, err
 	}
 
+	label := strings.TrimSpace(opts.Label)
+	if label == "" {
+		label = payload.Recipe.Name
+	}
+	if label == "" {
+		label = filepath.Base(payload.Dir)
+	}
+	recipeJSON, _ := json.Marshal(payload.Recipe)
+	assetsJSON, _ := json.Marshal(opts.Assets)
+
 	sess := store.Session{
 		ID:        id,
-		App:       opts.App, // 存注册表 key（稳定标识）；展示名用 appSpec.Name
-		Ref:       opts.Ref,
+		App:       label,
+		Ref:       opts.Commit,
+		CommitSHA: opts.Commit,
 		Image:     m.cfg.Image,
 		Status:    store.StatusStarting,
 		CDPPort:   cdpPort,
 		VNCPort:   vncPort,
 		Slot:      slot,
 		Dir:       dir,
+		Payload:   opts.Payload,
+		Assets:    string(assetsJSON),
+		Recipe:    string(recipeJSON),
 		CreatedAt: time.Now(),
 	}
 	if err := m.store.CreateSession(ctx, sess); err != nil {
 		return store.Session{}, err
 	}
 
+	// 引用住用到的 manifest（payload + 每个 manifest 素材），回收时才不会被提前删掉
+	m.retainSources(ctx, opts.Payload, opts.Assets)
 	return sess, nil
+}
+
+// retainSources 给用到的 manifest 加引用；尽力而为（失败只告警，不影响会话）。
+func (m *Manager) retainSources(ctx context.Context, payload string, assets map[string]string) {
+	all := make([]string, 0, len(assets)+1)
+	all = append(all, payload)
+	for _, value := range assets {
+		all = append(all, value)
+	}
+	for _, raw := range all {
+		src, err := ParseSource(raw)
+		if err != nil || src.Kind != "manifest" {
+			continue
+		}
+		if err := m.store.Retain(ctx, "manifest", src.Digest); err != nil {
+			m.log.Warn("增加产物引用失败", "manifest", src.Digest, "err", err)
+		}
+	}
+}
+
+// releaseSources 归还引用（收尾时调用），让 GC 能把没人用的产物删掉。
+func (m *Manager) releaseSources(ctx context.Context, sess store.Session) {
+	all := make([]string, 0, 4)
+	all = append(all, sess.Payload)
+	var assets map[string]string
+	if sess.Assets != "" {
+		_ = json.Unmarshal([]byte(sess.Assets), &assets)
+	}
+	for _, value := range assets {
+		all = append(all, value)
+	}
+	for _, raw := range all {
+		src, err := ParseSource(raw)
+		if err != nil || src.Kind != "manifest" {
+			continue
+		}
+		if err := m.store.Release(ctx, "manifest", src.Digest); err != nil {
+			m.log.Warn("释放产物引用失败", "manifest", src.Digest, "err", err)
+		}
+	}
 }
 
 // Provision 起容器并等应用就绪：docker run → 等 CDP → 读录像起点 → 置 ready。
@@ -193,9 +256,52 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 	containerName := "rigd-" + id
 	cdpPort := sess.CDPPort
 	vncPort := sess.VNCPort
-	appSpec, err := LookupApp(sess.App)
+
+	payload, err := m.resolvePayload(ctx, sess.Dir, sess.Payload, decodeAssets(sess.Assets))
 	if err != nil {
+		sess.Status = store.StatusFailed
+		sess.Error = err.Error()
+		sess.EndedAt = time.Now()
+		_ = m.store.UpdateSession(ctx, sess)
 		return sess, err
+	}
+
+	env := map[string]string{
+		"RIG_OUT":        "/out",
+		"RIG_W":          fmt.Sprint(m.cfg.Display.Width),
+		"RIG_H":          fmt.Sprint(m.cfg.Display.Height),
+		"RIG_FPS":        fmt.Sprint(m.cfg.Record.FPS),
+		"RIG_DEBUG_PORT": fmt.Sprint(cdpPort),
+		"RIG_VNC_PORT":   fmt.Sprint(vncPort),
+		"RIG_APP_NAME":   sess.App,
+		"RIG_APP_DIR":    "/app",
+		"RIG_ENTRY":      payload.Entry,
+		"RIG_READY_CDP":  fmt.Sprint(payload.Recipe.Ready.CDP),
+		"RIG_READY_SEC":  fmt.Sprint(payload.Recipe.Ready.TimeoutSec),
+	}
+	argsJSON := "[]"
+	if len(payload.Recipe.Args) > 0 {
+		if raw, err := json.Marshal(payload.Recipe.Args); err == nil {
+			argsJSON = string(raw)
+		}
+	}
+	env["RIG_ARGS"] = argsJSON
+	for key, value := range payload.Recipe.Env {
+		env[key] = value
+	}
+	for _, asset := range payload.Assets {
+		if asset.Slot.Env != "" {
+			env[asset.Slot.Env] = asset.Slot.Path
+		}
+	}
+
+	mounts := []dockerx.Mount{
+		{Source: sess.Dir, ContainerPath: "/out"},
+		// 产物只读：会话里被写坏的话，内容寻址库里那份（硬链接指向的）也就坏了
+		{Source: payload.Dir, ContainerPath: "/app", ReadOnly: true},
+	}
+	for _, asset := range payload.Assets {
+		mounts = append(mounts, dockerx.Mount{Source: asset.Dir, ContainerPath: asset.Slot.Path, ReadOnly: true})
 	}
 
 	spec := dockerx.Spec{
@@ -205,38 +311,8 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		NetworkHost: true,
 		ShmSize:     "512m",
 		Labels:      dockerx.DefaultLabels(id),
-		Env: map[string]string{
-			"RIG_OUT":        "/out",
-			"RIG_W":          fmt.Sprint(m.cfg.Display.Width),
-			"RIG_H":          fmt.Sprint(m.cfg.Display.Height),
-			"RIG_FPS":        fmt.Sprint(m.cfg.Record.FPS),
-			"RIG_DEBUG_PORT": fmt.Sprint(cdpPort),
-			"RIG_VNC_PORT":   fmt.Sprint(vncPort),
-			"RIG_APP_NAME":   appSpec.Name,
-			"RIG_APP_DIR":    appSpec.AppDir,
-			"RIG_GIT_REF":    sess.Ref,
-		},
-		Mounts: mountsFor(appSpec, sess.Dir, m.cfg.MediaDir, m.cfg.ModelsDir),
-	}
-
-	if appSpec.YarnCacheVolume != "" {
-		spec.Env["YARN_CACHE_FOLDER"] = "/cache/yarn"
-	}
-	if appSpec.ElectronCacheVolume != "" {
-		spec.Env["RIG_ELECTRON_CACHE"] = "/opt/electron-cache"
-	}
-	if appSpec.Repo != "" && sess.Ref != "" {
-		spec.Env["RIG_GIT_URL"] = appSpec.Repo
-	}
-	if appSpec.BuildScript != "" {
-		spec.Env["RIG_BUILD_SCRIPT"] = appSpec.BuildScript
-	}
-	if appSpec.Bootstrap != "" {
-		spec.Env["RIG_BOOTSTRAP"] = appSpec.Bootstrap
-	}
-	if appSpec.Repo == "" {
-		// 镜像内置应用：容器侧不需要取源码
-		spec.Env["RIG_SOURCE_MODE"] = "bundled"
+		Env:         env,
+		Mounts:      mounts,
 	}
 
 	containerID, err := m.docker.Run(ctx, spec)
@@ -313,18 +389,6 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		m.log.Warn("读取录像起点失败，操作偏移量将退化", "session", id, "err", err)
 	}
 
-	// 记录验的到底是哪个 commit：容器取码时写了 source.json，读不回来就留空，
-	// 但绝不能拿「分支名」冒充 sha——报告里那行必须可信。
-	if commit, err := m.readCommitSHA(ctx, containerName); err == nil && commit != "" {
-		sess.CommitSHA = commit
-		_ = m.store.UpdateSession(ctx, sess)
-		m.mu.Lock()
-		live.session.CommitSHA = commit
-		m.mu.Unlock()
-	} else if err != nil {
-		m.log.Warn("读取 commit 失败", "session", id, "err", err)
-	}
-
 	m.log.Info("会话就绪", "session", id, "cdp", cdpPort, "vnc", vncPort, "container", containerName)
 	return sess, nil
 }
@@ -386,6 +450,8 @@ func (m *Manager) finalize(ctx context.Context, sess store.Session, verdict, sum
 	if summary != "" {
 		sess.Summary = summary
 	}
+
+	m.releaseSources(ctx, sess)
 
 	videoPath := filepath.Join(sess.Dir, "video", "session.mp4")
 	if info, err := os.Stat(videoPath); err == nil {
@@ -626,21 +692,6 @@ func (m *Manager) readRecordingStart(ctx context.Context, container string) (int
 	return meta.StartedAtMs, nil
 }
 
-// readCommitSHA 从容器里读源码元信息（rig-fetch-source 写的 source.json）。
-func (m *Manager) readCommitSHA(ctx context.Context, container string) (string, error) {
-	out, err := m.docker.Exec(ctx, container, "cat", "/out/logs/source.json")
-	if err != nil {
-		return "", err
-	}
-	var meta struct {
-		Commit string `json:"commit"`
-	}
-	if err := json.Unmarshal([]byte(out), &meta); err != nil {
-		return "", fmt.Errorf("解析 source.json 失败: %w", err)
-	}
-	return meta.Commit, nil
-}
-
 type videoMeta struct {
 	DurationMS int64   `json:"durationMs"`
 	Duration   float64 `json:"duration"`
@@ -700,30 +751,6 @@ func tailLines(text string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	return strings.Join(lines[len(lines)-n:], "\n")
-}
-
-// mountsFor 组装挂载：/out 必须有；依赖缓存卷只有应用声明了才挂
-// （内置示例应用不需要，挂空卷名会直接让 docker 报错）。
-func mountsFor(spec AppSpec, sessionDir, mediaDir, modelsDir string) []dockerx.Mount {
-	mounts := []dockerx.Mount{{Source: sessionDir, ContainerPath: "/out"}}
-	if mediaDir != "" {
-		mounts = append(mounts, dockerx.Mount{Source: mediaDir, ContainerPath: "/assets", ReadOnly: true})
-	}
-	if modelsDir != "" {
-		// 必须是顶层路径：把只读目录嵌在另一个只读挂载里面，runc 无法在只读的
-		// /assets 里创建 /assets/models 这个挂载点（Read-only file system）。
-		mounts = append(mounts, dockerx.Mount{Source: modelsDir, ContainerPath: "/models", ReadOnly: true})
-	}
-	add := func(volume, target string) {
-		if volume == "" {
-			return
-		}
-		mounts = append(mounts, dockerx.Mount{Source: volume, ContainerPath: target})
-	}
-	add(spec.NodeModulesVolume, filepath.Join(spec.AppDir, "node_modules"))
-	add(spec.YarnCacheVolume, "/cache/yarn")
-	add(spec.ElectronCacheVolume, "/opt/electron-cache")
-	return mounts
 }
 
 // MachineView 看板上的一台机器：固定槽位 + 当前占用它的会话（可能没有）。
@@ -897,11 +924,6 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		}
 		if ms, err := m.readRecordingStart(ctx, "rigd-"+sess.ID); err == nil {
 			live.recordingStartMs = ms
-		}
-		if commit, err := m.readCommitSHA(ctx, "rigd-"+sess.ID); err == nil && commit != "" {
-			sess.CommitSHA = commit
-			live.session.CommitSHA = commit
-			_ = m.store.UpdateSession(ctx, sess)
 		}
 
 		m.mu.Lock()

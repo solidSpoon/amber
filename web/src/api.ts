@@ -25,6 +25,9 @@ export interface Session {
   idleDeadline?: string;
   hasVideo: boolean;
   videoDurationMs: number;
+  /** 这次验的是哪份产物、挂了哪些素材槽位 */
+  payload?: string;
+  assets?: Record<string, string>;
   /** 录像里真正有内容的那块区域（= 应用窗口） */
   frame?: Geometry;
   /** 录像的整幅像素（= 录制时的虚拟屏） */
@@ -82,12 +85,20 @@ export interface Machine {
   statsOk: boolean;
 }
 
-/** 注册表里的被测应用（后端 app 注册表，控制台不写死任何应用名） */
-export interface AppInfo {
-  key: string;
-  name: string;
-  repo: string;
-  description: string;
+/** 已上传过的产物（内容寻址库里的一棵目录树） */
+export interface PayloadInfo {
+  digest: string;
+  bytes: number;
+  files: number;
+  refs: number;
+  usedAt: string;
+}
+
+export interface PayloadsResponse {
+  payloads: PayloadInfo[];
+  storage: { blobs: number; bytes: number };
+  uploadLimitMB: number;
+  roots: string[];
 }
 
 /** 运行时信息：虚拟屏尺寸等（看板按真实比例画显示器） */
@@ -133,12 +144,11 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 export const api = {
   listSessions: () => get<{ sessions: Session[] }>('/api/sessions'),
   getSession: (id: string) => get<Session>(`/api/sessions/${id}`),
-  createSession: (app: string, ref: string) => post<Session>('/api/sessions', { app, ref }),
   stopSession: (id: string, verdict?: string, summary?: string) =>
     post<Session>(`/api/sessions/${id}/stop`, { verdict, summary }),
   listEvents: (id: string) => get<{ events: SessionEvent[] }>(`/api/sessions/${id}/events`),
   metrics: () => get<{ samples: Sample[] }>('/api/system/metrics'),
-  apps: () => get<{ apps: AppInfo[] }>('/api/apps'),
+  payloads: () => get<PayloadsResponse>('/api/payloads'),
   machines: () => get<{ machines: Machine[] }>('/api/machines'),
   info: () => get<RuntimeInfo>('/api/info'),
 };
