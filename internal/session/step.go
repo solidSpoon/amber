@@ -241,20 +241,16 @@ func sanitizeTool(tool string) string {
 // clipName 是某一步的短视频文件名（缓存在会话目录里）。
 // 文件名带窗口版本号：切片规则变了，老的缓存不能拿来复用。
 func clipName(seq int) string {
-	return filepath.Join("clips", fmt.Sprintf("step2-%04d.mp4", seq))
+	return filepath.Join("clips", fmt.Sprintf("step3-%04d.mp4", seq))
 }
 
-// clipWindow 算出第 idx 步该切哪一段：这一步自己那 2 秒。
-//
-// 起点在动作前 0.6 秒、终点在动作后 1.4 秒：短到能一眼看完，又不至于把整段
-// 录像切碎。窗口不随邻居挪动——相邻两步各看各的那 2 秒，谁也不会把别人的
-// 画面当成自己的重复播一遍（之前「前后各 2 秒」就会重叠成那样）。
+// clipWindow 算某一步的切片窗口：前后各 2 秒。
 func clipWindow(target store.Event) (startMS, lengthMS int64) {
-	start := target.VideoOffsetMS - 600
+	start := target.VideoOffsetMS - 2000
 	if start < 0 {
 		start = 0
 	}
-	return start, 2000
+	return start, 4000
 }
 
 // 保证 store.Event 里的字段在本包里都用到（避免只加了一半）。
@@ -285,13 +281,10 @@ func (m *Manager) Assert(ctx context.Context, id, claim string, passed bool, evi
 	return err
 }
 
-// Clip 返回「这一步自己的那几秒」的短视频路径（按需切片并缓存）。
-//
-// 窗口按步切：从上一动作开始，到这一动作之后 1.2 秒，且不越过下一步。
-// 不用「前后各 2 秒」的固定窗口——相邻几步会因此大面积重叠，同一段画面
-// 在十几个缩略图里各循环一遍，页面上就是「窗口反复变大变小」的错觉。
+// Clip 返回某一步前后各 2 秒的短视频路径（按需切片并缓存）。
 //
 // 为什么是懒切片：报告里没人看的那一步不该在收尾时花时间编码。
+// 切片用固定窗口而不是「等动画结束」——可预期，也够用。
 func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) {
 	sess, err := m.Get(ctx, id)
 	if err != nil {
