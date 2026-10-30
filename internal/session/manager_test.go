@@ -55,6 +55,10 @@ func (f *fakeDocker) Exec(context.Context, string, ...string) (string, error) {
 
 func (f *fakeDocker) CountRunning(context.Context, string) (int, error) { return 0, nil }
 
+func (f *fakeDocker) Stats(context.Context, string) (dockerx.Stats, error) {
+	return dockerx.Stats{CPUPct: 12.5, MemUsed: 200 << 20, MemLimit: 2 << 30}, nil
+}
+
 func (f *fakeDocker) Logs(context.Context, string, int) (string, error) { return "", nil }
 
 // fakeInspector 模拟页面：快照固定返回两个元素，点击/输入只记录调用。
@@ -106,6 +110,11 @@ func (f *fakeInspector) Screenshot(_ context.Context, path string) (int64, error
 		return 0, err
 	}
 	return 3, nil
+}
+
+func (f *fakeInspector) PreviewJPEG(context.Context, int) ([]byte, error) {
+	// 1x1 的 JPEG 最小帧，够测试 MJPEG 封装
+	return []byte{0xFF, 0xD8, 0xFF, 0xD9}, nil
 }
 
 func (f *fakeInspector) Close() error { return nil }

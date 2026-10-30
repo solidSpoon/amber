@@ -38,6 +38,9 @@ func (fakeDocker) Exec(context.Context, string, ...string) (string, error) {
 }
 func (fakeDocker) CountRunning(context.Context, string) (int, error) { return 1, nil }
 func (fakeDocker) Logs(context.Context, string, int) (string, error) { return "", nil }
+func (fakeDocker) Stats(context.Context, string) (dockerx.Stats, error) {
+	return dockerx.Stats{CPUPct: 12.5, MemUsed: 200 << 20, MemLimit: 2 << 30}, nil
+}
 
 type fakeInspector struct {
 	mu   sync.Mutex
@@ -62,6 +65,9 @@ func (f *fakeInspector) Screenshot(_ context.Context, path string) (int64, error
 		return 0, err
 	}
 	return 3, nil
+}
+func (f *fakeInspector) PreviewJPEG(context.Context, int) ([]byte, error) {
+	return []byte{0xFF, 0xD8, 0xFF, 0xD9}, nil
 }
 func (f *fakeInspector) Close() error { return nil }
 

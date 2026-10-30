@@ -220,10 +220,25 @@ func (c *Client) Evaluate(ctx context.Context, expression string) (json.RawMessa
 
 // Screenshot 截当前页面（PNG base64）。
 func (c *Client) Screenshot(ctx context.Context) (string, error) {
+	return c.capture(ctx, "png", 0)
+}
+
+// ScreenshotJPEG 截 JPEG（看板实时预览用：同样画面体积只有 PNG 的 1/5）。
+//
+// quality 取 1~100，0 表示用 CDP 默认值。
+func (c *Client) ScreenshotJPEG(ctx context.Context, quality int) (string, error) {
+	return c.capture(ctx, "jpeg", quality)
+}
+
+func (c *Client) capture(ctx context.Context, format string, quality int) (string, error) {
+	params := map[string]any{"format": format}
+	if quality > 0 {
+		params["quality"] = quality
+	}
 	var out struct {
 		Data string `json:"data"`
 	}
-	if err := c.Call(ctx, "Page.captureScreenshot", map[string]any{"format": "png"}, &out); err != nil {
+	if err := c.Call(ctx, "Page.captureScreenshot", params, &out); err != nil {
 		return "", err
 	}
 	return out.Data, nil

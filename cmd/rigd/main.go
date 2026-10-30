@@ -78,6 +78,11 @@ func runMCP(ctx context.Context, manager *session.Manager, logger *slog.Logger) 
 
 // runHTTP 启动管理台：调度器扫超时、采样器采指标、HTTP 出接口与页面。
 func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *session.Manager, docker dockerx.Runner, logger *slog.Logger) {
+	if n, err := manager.RecoverSessions(ctx); err != nil {
+		logger.Warn("接管历史会话失败", "err", err)
+	} else if n > 0 {
+		logger.Info("接管历史会话完成", "count", n)
+	}
 	go manager.RunSweeper(ctx, 30*time.Second)
 	go telemetry.NewSampler(st, docker, cfg.DataDir, logger).Run(ctx, cfg.SampleInterval)
 

@@ -72,6 +72,70 @@ type Runner interface {
 	CountRunning(ctx context.Context, labelSelector string) (int, error)
 	// Logs 取容器日志尾部。
 	Logs(ctx context.Context, name string, tail int) (string, error)
+	// Stats 取容器实时资源占用（看板每台机器下面那行数字）。
+	Stats(ctx context.Context, name string) (Stats, error)
+}
+
+// Stats 容器资源快照。
+type Stats struct {
+	CPUPct   float64
+	MemUsed  uint64
+	MemLimit uint64
+}
+
+func (c *CLI) Stats(ctx context.Context, name string) (Stats, error) {
+	// --no-stream 取一次；解析 docker 的两段式输出（"1.25%|120MiB / 2GiB"）
+	out, err := c.run(ctx, "stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", name)
+	if err != nil {
+		return Stats{}, err
+	}
+	parts := strings.Split(strings.TrimSpace(out), "|")
+	if len(parts) != 2 {
+		return Stats{}, fmt.Errorf("docker stats 输出无法解析: %q", out)
+	}
+	stats := Stats{CPUPct: parsePercent(parts[0])}
+	stats.MemUsed, stats.MemLimit = parseMemPair(parts[1])
+	return stats, nil
+}
+
+// parsePercent "1.25%" → 1.25
+func parsePercent(s string) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(s), "%"), 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// parseMemPair "120.5MiB / 2GiB" → (字节, 字节)
+func parseMemPair(s string) (uint64, uint64) {
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	return parseBytes(parts[0]), parseBytes(parts[1])
+}
+
+// parseBytes 解析 docker 的容量字符串（B/kB/MiB/GiB，二进制单位优先）。
+func parseBytes(s string) uint64 {
+	s = strings.TrimSpace(s)
+	units := []struct {
+		suffix string
+		scale  float64
+	}{
+		{"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10},
+		{"GB", 1e9}, {"MB", 1e6}, {"kB", 1e3}, {"B", 1},
+	}
+	for _, u := range units {
+		if strings.HasSuffix(s, u.suffix) {
+			v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(s, u.suffix)), 64)
+			if err != nil {
+				return 0
+			}
+			return uint64(v * u.scale)
+		}
+	}
+	return 0
 }
 
 // ErrContainerNotFound 表示容器不存在（用于识别「已被外部清掉」）。

@@ -34,6 +34,22 @@ export interface SessionEvent {
   artifact?: string;
 }
 
+/** 看板上的一台机器（一个固定槽位） */
+export interface Machine {
+  slot: number;
+  occupied: boolean;
+  sessionId?: string;
+  app?: string;
+  ref?: string;
+  status?: SessionStatus;
+  since?: string;
+  idleUntil?: string;
+  cdpPort?: number;
+  vncPort?: number;
+  stats: { CPUPct: number; MemUsed: number; MemLimit: number };
+  statsOk: boolean;
+}
+
 export interface Sample {
   at: string;
   cpuPct: number;
@@ -74,6 +90,7 @@ export const api = {
     post<Session>(`/api/sessions/${id}/stop`, { verdict, summary }),
   listEvents: (id: string) => get<{ events: SessionEvent[] }>(`/api/sessions/${id}/events`),
   metrics: () => get<{ samples: Sample[] }>('/api/system/metrics'),
+  machines: () => get<{ machines: Machine[] }>('/api/machines'),
 };
 
 /** 订阅 SSE；返回取消函数，组件卸载时调用。 */
@@ -87,6 +104,11 @@ export function subscribe<T>(path: string, onData: (payload: T) => void): () => 
     }
   };
   return () => source.close();
+}
+
+/** 机器槽位的显示名：M1 / M2 ……依次类推 */
+export function machineName(slot: number): string {
+  return `M${slot + 1}`;
 }
 
 export function formatBytes(bytes: number): string {

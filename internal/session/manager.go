@@ -43,6 +43,8 @@ type Inspector interface {
 	Press(ctx context.Context, key string) error
 	Evaluate(ctx context.Context, script string) (json.RawMessage, error)
 	Screenshot(ctx context.Context, path string) (int64, error)
+	// PreviewJPEG 取一帧 JPEG（看板实时预览），不落盘
+	PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
 	Close() error
 }
 
@@ -59,6 +61,9 @@ type Manager struct {
 
 	mu   sync.Mutex
 	live map[string]*liveSession
+
+	statsMu    sync.Mutex
+	statsCache map[string]statsEntry
 }
 
 // liveSession 只存在于内存的运行时状态。
@@ -128,6 +133,22 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 		return store.Session{}, fmt.Errorf("应用 %s 需要验收素材，但未配置 RIGD_MEDIA_DIR", opts.App)
 	}
 
+	// 槽位 = 看板上的机器位置，固定 0..MaxSessions-1；占满则拒绝
+	used, err := m.store.UsedSlots(ctx)
+	if err != nil {
+		return store.Session{}, err
+	}
+	slot := -1
+	for i := 0; i < m.cfg.MaxSessions; i++ {
+		if _, taken := used[i]; !taken {
+			slot = i
+			break
+		}
+	}
+	if slot < 0 {
+		return store.Session{}, ErrTooManySessions
+	}
+
 	id := newID()
 	dir := filepath.Join(m.cfg.SessionsDir(), id)
 	for _, sub := range []string{"video", "screenshots", "report", "logs"} {
@@ -153,6 +174,7 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 		Status:    store.StatusStarting,
 		CDPPort:   cdpPort,
 		VNCPort:   vncPort,
+		Slot:      slot,
 		Dir:       dir,
 		CreatedAt: time.Now(),
 	}
@@ -619,4 +641,159 @@ func mountsFor(spec AppSpec, sessionDir, mediaDir string) []dockerx.Mount {
 	add(spec.YarnCacheVolume, "/cache/yarn")
 	add(spec.ElectronCacheVolume, "/opt/electron-cache")
 	return mounts
+}
+
+// MachineView 看板上的一台机器：固定槽位 + 当前占用它的会话（可能没有）。
+type MachineView struct {
+	Slot      int           `json:"slot"`
+	Occupied  bool          `json:"occupied"`
+	SessionID string        `json:"sessionId,omitempty"`
+	App       string        `json:"app,omitempty"`
+	Ref       string        `json:"ref,omitempty"`
+	Status    string        `json:"status,omitempty"`
+	Since     time.Time     `json:"since,omitempty"`
+	IdleUntil time.Time     `json:"idleUntil,omitempty"`
+	CDPPort   int           `json:"cdpPort,omitempty"`
+	VNCPort   int           `json:"vncPort,omitempty"`
+	Stats     dockerx.Stats `json:"stats"`
+	StatsOK   bool          `json:"statsOk"`
+}
+
+// Machines 返回全部槽位状态（看板首页的数据源）。
+//
+// 统计数字走 docker stats，单次调用要几十到几百毫秒，所以做 3 秒缓存：
+// 看板本来就是"看个大概"，没必要每次刷新都把 docker 敲一遍。
+func (m *Manager) Machines(ctx context.Context) ([]MachineView, error) {
+	used, err := m.store.UsedSlots(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// 用一次查询把活跃会话取出来，避免逐槽位查库
+	active, err := m.store.ActiveSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bySlot := make(map[int]store.Session, len(active))
+	for _, sess := range active {
+		bySlot[sess.Slot] = sess
+	}
+
+	out := make([]MachineView, 0, m.cfg.MaxSessions)
+	for slot := 0; slot < m.cfg.MaxSessions; slot++ {
+		view := MachineView{Slot: slot}
+		if sessID, ok := used[slot]; ok {
+			sess := bySlot[slot]
+			view.Occupied = true
+			view.SessionID = sessID
+			view.App = sess.App
+			view.Ref = sess.Ref
+			view.Status = string(sess.Status)
+			view.Since = sess.StartedAt
+			view.IdleUntil = sess.IdleDeadline
+			view.CDPPort = sess.CDPPort
+			view.VNCPort = sess.VNCPort
+			if stats, ok := m.cachedStats(sess.Container); ok {
+				view.Stats = stats
+				view.StatsOK = true
+			}
+		}
+		out = append(out, view)
+	}
+	return out, nil
+}
+
+// Preview 取会话的一帧预览（不写审计：看板刷屏不应污染验收记录）。
+func (m *Manager) Preview(ctx context.Context, id string, quality int) ([]byte, error) {
+	insp, err := m.inspector(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	preview, ok := insp.(interface {
+		PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
+	})
+	if !ok {
+		return nil, errors.New("当前检查器不支持预览帧")
+	}
+	return preview.PreviewJPEG(ctx, quality)
+}
+
+// cachedStats 3 秒内的容器统计直接复用。
+func (m *Manager) cachedStats(container string) (dockerx.Stats, bool) {
+	if container == "" {
+		return dockerx.Stats{}, false
+	}
+	m.statsMu.Lock()
+	if cached, ok := m.statsCache[container]; ok && time.Since(cached.at) < 3*time.Second {
+		m.statsMu.Unlock()
+		return cached.stats, true
+	}
+	m.statsMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	stats, err := m.docker.Stats(ctx, container)
+	if err != nil {
+		return dockerx.Stats{}, false
+	}
+	m.statsMu.Lock()
+	if m.statsCache == nil {
+		m.statsCache = map[string]statsEntry{}
+	}
+	m.statsCache[container] = statsEntry{stats: stats, at: time.Now()}
+	m.statsMu.Unlock()
+	return stats, true
+}
+
+type statsEntry struct {
+	stats dockerx.Stats
+	at    time.Time
+}
+
+// RecoverSessions 进程启动时接管仍在运行的会话。
+//
+// 没有这一步，重启控制面就会"孤儿化"：库里有记录、容器还在跑，但内存里的连接没了，
+// 看板画面与工具调用都会失效。这里重建 live 状态，包括录像起点（决定审计偏移）。
+func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
+	active, err := m.store.ActiveSessions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	recovered := 0
+	for _, sess := range active {
+		live := &liveSession{session: sess, lastActivity: time.Now()}
+
+		// 容器没了就标记失败，别让它一直挂在"运行中"
+		state, err := m.docker.Inspect(ctx, "rigd-"+sess.ID)
+		if err != nil || !state.Running {
+			sess.Status = store.StatusFailed
+			sess.Error = "控制面重启时容器已不在运行"
+			sess.EndedAt = time.Now()
+			_ = m.store.UpdateSession(ctx, sess)
+			continue
+		}
+
+		if inspector, err := m.factory(ctx, sess.CDPPort); err == nil {
+			live.inspector = inspector
+		} else {
+			m.log.Warn("接管会话时连接调试端口失败", "session", sess.ID, "err", err)
+		}
+		if ms, err := m.readRecordingStart(ctx, "rigd-"+sess.ID); err == nil {
+			live.recordingStartMs = ms
+		}
+		if commit, err := m.readCommitSHA(ctx, "rigd-"+sess.ID); err == nil && commit != "" {
+			sess.CommitSHA = commit
+			live.session.CommitSHA = commit
+			_ = m.store.UpdateSession(ctx, sess)
+		}
+
+		m.mu.Lock()
+		m.live[sess.ID] = live
+		m.mu.Unlock()
+		recovered++
+	}
+	if recovered > 0 {
+		m.log.Info("已接管仍在运行的会话", "count", recovered)
+	}
+	return recovered, nil
 }

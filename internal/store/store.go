@@ -62,6 +62,8 @@ type Session struct {
 	Status          Status
 	CDPPort         int
 	VNCPort         int
+	// Slot 占用的机器槽位（0..N-1），看板按槽位固定展示两台机器
+	Slot            int
 	Dir             string
 	CreatedAt       time.Time
 	StartedAt       time.Time
@@ -227,11 +229,11 @@ func parseTime(v sql.NullString) time.Time {
 // CreateSession 写入一条新会话。
 func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions
-		(id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, dir,
+		(id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
 		 created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.App, sess.Ref, sess.CommitSHA, sess.Image, sess.Container, string(sess.Status),
-		sess.CDPPort, sess.VNCPort, sess.Dir,
+		sess.CDPPort, sess.VNCPort, sess.Slot, sess.Dir,
 		sess.CreatedAt.UTC().Format(time.RFC3339Nano), formatTime(sess.StartedAt), formatTime(sess.EndedAt),
 		formatTime(sess.IdleDeadline), sess.VideoPath, sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error)
 	if err != nil {
@@ -263,7 +265,7 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 // ErrNotFound 表示目标记录不存在。
 var ErrNotFound = errors.New("记录不存在")
 
-const sessionColumns = `id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, dir,
+const sessionColumns = `id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
 	created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error`
 
 func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
@@ -274,7 +276,7 @@ func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 		startedAt, endedAt, idleDeadline  sql.NullString
 	)
 	err := sc.Scan(&sess.ID, &sess.App, &sess.Ref, &sess.CommitSHA, &sess.Image, &sess.Container, &status,
-		&sess.CDPPort, &sess.VNCPort, &sess.Dir, &createdAt, &startedAt, &endedAt, &idleDeadline,
+		&sess.CDPPort, &sess.VNCPort, &sess.Slot, &sess.Dir, &createdAt, &startedAt, &endedAt, &idleDeadline,
 		&sess.VideoPath, &sess.VideoDurationMS, &sess.Verdict, &sess.Summary, &sess.Error)
 	if err != nil {
 		return Session{}, err
@@ -473,6 +475,29 @@ func (s *Store) RecentSamples(ctx context.Context, limit int) ([]Sample, error) 
 		out[i], out[j] = out[j], out[i]
 	}
 	return out, rows.Err()
+}
+
+// UsedSlots 返回当前被非终态会话占用的槽位集合。
+func (s *Store) UsedSlots(ctx context.Context) (map[int]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT slot, id FROM sessions
+		WHERE status NOT IN (?, ?, ?)`, string(StatusFinished), string(StatusFailed), string(StatusAbandoned))
+	if err != nil {
+		return nil, fmt.Errorf("查询槽位占用失败: %w", err)
+	}
+	defer rows.Close()
+
+	used := map[int]string{}
+	for rows.Next() {
+		var (
+			slot int
+			id   string
+		)
+		if err := rows.Scan(&slot, &id); err != nil {
+			return nil, fmt.Errorf("扫描槽位失败: %w", err)
+		}
+		used[slot] = id
+	}
+	return used, rows.Err()
 }
 
 // ActiveSessions 返回所有非终态会话，供调度器做超时回收。

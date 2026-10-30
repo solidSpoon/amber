@@ -74,6 +74,8 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}/video", s.serveVideo)
 		api.Get("/sessions/{id}/artifacts/{name}", s.serveArtifact)
 		api.Get("/sessions/stream", s.streamSessions)
+		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
+		api.Get("/machines", s.machines)
 		api.Get("/system/metrics", s.systemMetrics)
 		api.Get("/system/stream", s.streamSystem)
 	})
@@ -441,4 +443,67 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// machines 看板首页的数据源：固定槽位的两台（或多台）候选机器。
+func (s *Server) machines(w http.ResponseWriter, r *http.Request) {
+	views, err := s.manager.Machines(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"machines": views})
+}
+
+// screenStream 把会话画面以 MJPEG 推给看板。
+//
+// 用 MJPEG 而不是 WebSocket：浏览器里一个 <img> 就能显示，不需要前端写解码循环，
+// 断线重连也是浏览器自己处理。帧率故意压到 2fps——看板是"看一眼在干嘛"，
+// 更高的帧率只会把 CPU 和带宽吃在无意义的地方。
+func (s *Server) screenStream(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, errors.New("当前服务器不支持流式响应"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	send := func() bool {
+		frame, err := s.manager.Preview(r.Context(), id, 70)
+		if err != nil {
+			return true // 暂时取不到（正在构建/暂停），下一拍再试
+		}
+		if _, err := fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(frame)); err != nil {
+			return false
+		}
+		if _, err := w.Write(frame); err != nil {
+			return false
+		}
+		if _, err := w.Write([]byte("\r\n")); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	if !send() {
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if !send() {
+				return
+			}
+		}
+	}
 }

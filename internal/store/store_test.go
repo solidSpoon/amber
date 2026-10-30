@@ -198,7 +198,12 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("查询迁移记录失败: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("迁移应只记录一次，实际 %d", count)
+	// 每个内嵌迁移恰好记录一次（当前是 0001_init + 0002_session_slot）
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("读取迁移目录失败: %v", err)
+	}
+	if count != len(entries) {
+		t.Fatalf("迁移记录数应等于迁移文件数 %d，实际 %d", len(entries), count)
 	}
 }

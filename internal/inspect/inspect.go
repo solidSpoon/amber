@@ -197,6 +197,19 @@ func (c *Client) Evaluate(ctx context.Context, script string) (json.RawMessage, 
 	return c.cdp.Evaluate(ctx, script)
 }
 
+// PreviewJPEG 只取一帧 JPEG（不落盘），给看板的实时预览用。
+func (c *Client) PreviewJPEG(ctx context.Context, quality int) ([]byte, error) {
+	data, err := c.cdp.ScreenshotJPEG(ctx, quality)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return nil, fmt.Errorf("解码预览帧失败: %w", err)
+	}
+	return raw, nil
+}
+
 // Screenshot 截图并落盘，返回写入的字节数。
 func (c *Client) Screenshot(ctx context.Context, path string) (int64, error) {
 	data, err := c.cdp.Screenshot(ctx)
