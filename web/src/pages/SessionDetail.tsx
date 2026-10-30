@@ -178,7 +178,7 @@ function StepRow({
           · 这之间 {formatClock(gapMs / 1000)} 没有操作（模型在思考） ·
         </li>
       )}
-      <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_260px] sm:gap-6">
+      <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_340px] sm:gap-6">
         <div className="min-w-0">
           <div className="flex items-baseline gap-2">
             <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
@@ -244,6 +244,7 @@ function StepMedia({
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const [inView, setInView] = useState(false);
+  const [progress, setProgress] = useState(0);
 
   useEffect(() => {
     const el = ref.current;
@@ -281,6 +282,10 @@ function StepMedia({
             playsInline
             preload="metadata"
             className="size-full"
+            onTimeUpdate={(e) => {
+              const video = e.currentTarget;
+              setProgress(video.duration ? video.currentTime / video.duration : 0);
+            }}
           />
         </ScreenStage>
       ) : (
@@ -290,6 +295,15 @@ function StepMedia({
           loading="lazy"
           className="block aspect-video w-full object-cover"
         />
+      )}
+      {event.clip && (
+        // 进度条跟着这 4 秒循环走：一眼看出片段放到了哪，不用等它播完
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-[3px] bg-black/40">
+          <span
+            className="block h-full bg-white shadow-[0_0_2px_rgba(0,0,0,0.6)] transition-[width] duration-150 ease-linear"
+            style={{ width: `${Math.min(100, progress * 100)}%` }}
+          />
+        </span>
       )}
       <span className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100">
         <Maximize2Icon className="size-4 text-white drop-shadow" />
