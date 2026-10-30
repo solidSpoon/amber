@@ -12,6 +12,7 @@ import {
   formatAgo,
   formatBytes,
   machineName,
+  type Feedback,
   type Machine,
   type RuntimeInfo,
   type Sample,
@@ -30,23 +31,26 @@ export default function Dashboard() {
   const [samples, setSamples] = useState<Sample[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [info, setInfo] = useState<RuntimeInfo | null>(null);
+  const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let alive = true;
     async function load() {
       try {
-        const [m, s, list, meta] = await Promise.all([
+        const [m, s, list, meta, fb] = await Promise.all([
           api.machines(),
           api.metrics(),
           api.listSessions(),
           api.info(),
+          api.feedback(),
         ]);
         if (!alive) return;
         setMachines(m.machines ?? []);
         setSamples(s.samples ?? []);
         setSessions((list.sessions ?? []).slice(0, 5));
         setInfo(meta);
+        setFeedback(fb.feedback ?? []);
         setError('');
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : String(err));
@@ -155,6 +159,42 @@ export default function Dashboard() {
                 ))}
               </TableBody>
             </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 建议来自 AI 自己：用完这套工作流后觉得哪里别扭，就写在这里。
+          它不进验收报告——报告只讲那次验收发生了什么。 */}
+      <Card>
+        <CardHeader>
+          <CardTitle>工作流建议</CardTitle>
+          <CardDescription>AI 用完这套流程后留下的意见，用来改产品本身。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {feedback.length === 0 ? (
+            <Empty>
+              <EmptyHeader>
+                <EmptyTitle>还没有建议</EmptyTitle>
+                <EmptyDescription>AI 觉得哪里别扭时，会通过 feedback 留下意见。</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : (
+            <div className="flex flex-col divide-y">
+              {feedback.map((f) => (
+                <div key={f.id} className="flex flex-col gap-1 py-2 first:pt-0 last:pb-0">
+                  <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                    <span>{formatAgo(f.at)}</span>
+                    {f.rating > 0 && <span>· 评分 {f.rating}/5</span>}
+                    {f.sessionId && (
+                      <a href={`#/sessions/${f.sessionId}`} className="font-mono hover:underline">
+                        · {f.sessionId}
+                      </a>
+                    )}
+                  </div>
+                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{f.body}</p>
+                </div>
+              ))}
+            </div>
           )}
         </CardContent>
       </Card>

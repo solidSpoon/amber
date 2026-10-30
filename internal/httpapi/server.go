@@ -122,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 		api.Post("/manifests", s.putManifest)
 		api.Get("/mcp", s.mcpInfo)
 		api.Get("/docs/product", s.productDoc)
+		api.Get("/feedback", s.listFeedback)
 		api.Get("/system/metrics", s.systemMetrics)
 		api.Get("/system/stream", s.streamSystem)
 	})
@@ -375,6 +376,31 @@ func (s *Server) serveVideo(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveClip 某一步前后 4 秒的短片（懒切片，切过就缓存）。
+// listFeedback 最近的 AI 建议（给控制台看，也是为了后续集中分析）。
+func (s *Server) listFeedback(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	items, err := s.store.ListFeedback(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, f := range items {
+		out = append(out, map[string]any{
+			"id":        f.ID,
+			"at":        f.At.UTC().Format(time.RFC3339Nano),
+			"sessionId": f.SessionID,
+			"source":    f.Source,
+			"rating":    f.Rating,
+			"body":      f.Body,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"feedback": out})
+}
+
 // productDoc 返回产品文档原文：页面按 Markdown 渲染，文档本身只有一份（docs/PRODUCT.md）。
 func (s *Server) productDoc(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")

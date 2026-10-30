@@ -111,6 +111,16 @@ export interface RuntimeInfo {
   idleTimeout: string;
 }
 
+/** AI 用完工作流后留下的建议（产品改进输入，不属于验收证据） */
+export interface Feedback {
+  id: number;
+  at: string;
+  sessionId: string;
+  source: string;
+  rating: number;
+  body: string;
+}
+
 export interface Sample {
   at: string;
   cpuPct: number;
@@ -153,6 +163,7 @@ export const api = {
   payloads: () => get<PayloadsResponse>('/api/payloads'),
   machines: () => get<{ machines: Machine[] }>('/api/machines'),
   info: () => get<RuntimeInfo>('/api/info'),
+  feedback: () => get<{ feedback: Feedback[] }>('/api/feedback?limit=20'),
 };
 
 /** 订阅 SSE；返回取消函数，组件卸载时调用。 */

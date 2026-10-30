@@ -15,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/solidSpoon/rigd/internal/inspect"
 	"github.com/solidSpoon/rigd/internal/session"
+	"github.com/solidSpoon/rigd/internal/store"
 )
 
 // doSnapshot 读页面结构。
@@ -237,8 +240,8 @@ func (s *Server) doAssert(ctx context.Context, a assertArgs) error {
 // ---- 批 -------------------------------------------------------------------
 
 const (
-	maxBatchSteps = 50
-	batchTimeout  = 2 * time.Minute
+	maxRunSteps = 50
+	runTimeout  = 2 * time.Minute
 )
 
 // batchStep 批里的一步：动作名 + 该动作自己的参数。
@@ -266,77 +269,145 @@ type batchStep struct {
 	Evidence  string  `json:"evidence,omitempty"`
 }
 
-// runBatchStep 执行批里的一步；返回一句给人看的结果。
-func (s *Server) runBatchStep(ctx context.Context, sid string, st batchStep) (string, error) {
+// stepExtra 是某些动作额外要交给模型的东西（元素表、求值结果、要展示的原文）。
+type stepExtra struct {
+	Text     string
+	Elements []inspect.Element
+	Value    any
+}
+
+// runStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
+func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
 	base := stepArgs{Intent: st.Intent, Expect: st.Expect}
 	switch st.Action {
 	case "snapshot":
 		snap, err := s.doSnapshot(ctx, sessionArgs{SessionID: sid, stepArgs: base})
 		if err != nil {
-			return "", err
+			return "", stepExtra{}, err
 		}
-		return fmt.Sprintf("读到 %d 个可操作元素", len(snap.Elements)), nil
+		return fmt.Sprintf("读到 %d 个可操作元素", len(snap.Elements)), stepExtra{
+			Text: inspect.Summarize(snap), Elements: snap.Elements,
+		}, nil
 	case "click":
-		return s.doClick(ctx, clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y})
+		msg, err := s.doClick(ctx, clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y})
+		return msg, stepExtra{}, err
 	case "fill":
-		return s.doFill(ctx, fillArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, Text: st.Text, Submit: st.Submit})
+		msg, err := s.doFill(ctx, fillArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, Text: st.Text, Submit: st.Submit})
+		return msg, stepExtra{}, err
 	case "press_key":
-		return s.doPress(ctx, pressArgs{SessionID: sid, stepArgs: base, Key: st.Key})
+		msg, err := s.doPress(ctx, pressArgs{SessionID: sid, stepArgs: base, Key: st.Key})
+		return msg, stepExtra{}, err
 	case "eval":
-		pretty, _, err := s.doEval(ctx, evalArgs{SessionID: sid, stepArgs: base, Script: st.Script})
+		pretty, val, err := s.doEval(ctx, evalArgs{SessionID: sid, stepArgs: base, Script: st.Script})
 		if err != nil {
-			return "", err
+			return "", stepExtra{}, err
 		}
-		return pretty, nil
+		return pretty, stepExtra{Value: val}, nil
 	case "wait":
-		return s.doWait(ctx, waitArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
+		msg, err := s.doWait(ctx, waitArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
+		return msg, stepExtra{}, err
 	case "screenshot":
-		_, size, err := s.doScreenshot(ctx, screenshotArgs{SessionID: sid, stepArgs: base, Label: st.Label})
+		path, size, err := s.doScreenshot(ctx, screenshotArgs{SessionID: sid, stepArgs: base, Label: st.Label})
 		if err != nil {
-			return "", err
+			return "", stepExtra{}, err
 		}
-		return fmt.Sprintf("已截图：%s（%d 字节）", st.Label, size), nil
+		return fmt.Sprintf("已截图：%s（%d 字节）", st.Label, size), stepExtra{Value: path}, nil
 	case "assert":
 		if st.OK == nil {
-			return "", errors.New("assert 必须给 ok")
+			return "", stepExtra{}, errors.New("assert 必须给 ok")
 		}
 		if err := s.doAssert(ctx, assertArgs{SessionID: sid, Claim: st.Claim, OK: *st.OK, Evidence: st.Evidence}); err != nil {
-			return "", err
+			return "", stepExtra{}, err
 		}
 		if *st.OK {
-			return "断言已记录 ✅：" + st.Claim, nil
+			return "断言已记录 ✅：" + st.Claim, stepExtra{}, nil
 		}
-		return "断言已记录 ❌：" + st.Claim, nil
+		return "断言已记录 ❌：" + st.Claim, stepExtra{}, nil
 	default:
-		return "", fmt.Errorf("未知动作 %q（可用：snapshot/click/fill/press_key/eval/wait/screenshot/assert）", st.Action)
+		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：snapshot/click/fill/press_key/eval/wait/screenshot/assert）", st.Action)
 	}
 }
 
-// doBatch 连续执行若干步；任何一步失败就停下，并把进度说清楚。
+// doRun 连续执行若干步；任何一步失败就停下，并把进度说清楚。
 //
 // 失败不返回 Go error：模型需要知道"跑到第几步、剩下没跑什么"，
 // 用错误把它吞掉反而更糊涂。会话本身的状态在报告里，不靠这里的返回值。
-func (s *Server) doBatch(ctx context.Context, a batchArgs) (string, bool, error) {
+func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error) {
 	if len(a.Steps) == 0 {
-		return "", false, errors.New("steps 不能为空")
+		return "", runResult{}, errors.New("steps 不能为空")
 	}
-	if len(a.Steps) > maxBatchSteps {
-		return "", false, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxBatchSteps, len(a.Steps))
+	if len(a.Steps) > maxRunSteps {
+		return "", runResult{}, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxRunSteps, len(a.Steps))
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, batchTimeout)
+	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
 	var b strings.Builder
+	res := runResult{Steps: make([]runStepResult, 0, len(a.Steps))}
 	for i, st := range a.Steps {
-		msg, err := s.runBatchStep(ctx, a.SessionID, st)
+		msg, extra, err := s.runStep(ctx, a.SessionID, st)
 		if err != nil {
 			fmt.Fprintf(&b, "%d. %s ✗ %v\n", i+1, st.Action, err)
-			fmt.Fprintf(&b, "批已停止：后面 %d 步没有执行。", len(a.Steps)-i-1)
-			return b.String(), false, nil
+			fmt.Fprintf(&b, "已停止：后面 %d 步没有执行。", len(a.Steps)-i-1)
+			res.Steps = append(res.Steps, runStepResult{
+				Index: i + 1, Action: st.Action, OK: false, Text: err.Error(), Elements: extra.Elements, Value: extra.Value,
+			})
+			res.StoppedAt = i + 1
+			return b.String(), res, nil
 		}
 		fmt.Fprintf(&b, "%d. %s ✓ %s\n", i+1, st.Action, msg)
+		if extra.Text != "" {
+			// 读页面结构这类动作，结果本身就是模型下一步的依据，原样贴出来
+			b.WriteString(extra.Text)
+			b.WriteString("\n")
+		}
+		res.Steps = append(res.Steps, runStepResult{
+			Index: i + 1, Action: st.Action, OK: true, Text: msg, Elements: extra.Elements, Value: extra.Value,
+		})
 	}
-	fmt.Fprintf(&b, "全部 %d 步执行完成。", len(a.Steps))
-	return b.String(), true, nil
+	if len(a.Steps) == 1 {
+		fmt.Fprintf(&b, "完成。")
+	} else {
+		fmt.Fprintf(&b, "全部 %d 步执行完成。", len(a.Steps))
+	}
+	res.OK = true
+	return b.String(), res, nil
+}
+
+func registerFeedbackTool(server *mcp.Server, s *Server) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "feedback",
+		Description: "用完这套工作流后，把「哪里别扭、缺什么、希望怎么改」写下来。" +
+			"这不是验收结论，也不会进报告——它只用于产品改进：被人看过之后统一变成改进项。" +
+			"用起来不顺、某个动作每次都要绕、报告哪里看不懂，都可以写。rating 可选（1~5）。",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args feedbackArgs) (*mcp.CallToolResult, actionResult, error) {
+		id, err := s.doFeedback(ctx, args)
+		if err != nil {
+			return nil, actionResult{}, err
+		}
+		return text(fmt.Sprintf("建议已记录（#%d）。", id)), actionResult{OK: true, Message: "建议已记录"}, nil
+	})
+}
+
+// doFeedback 记一条对工作流本身的建议。
+//
+// 它不是验收证据，也不进报告：这是给产品改进用的输入。
+// 单独列出来，是为了让模型知道"觉得哪里别扭"是有地方说的，
+// 而不是在报告里写一句"这个工具不好用"就算完。
+func (s *Server) doFeedback(ctx context.Context, a feedbackArgs) (int64, error) {
+	body := strings.TrimSpace(a.Text)
+	if body == "" {
+		return 0, errors.New("text 不能为空：具体说哪里别扭、缺什么")
+	}
+	if a.Rating < 0 || a.Rating > 5 {
+		return 0, errors.New("rating 只能是 1~5（可空）")
+	}
+	return s.store.AddFeedback(ctx, store.Feedback{
+		At:        time.Now(),
+		SessionID: a.SessionID,
+		Source:    "ai",
+		Rating:    a.Rating,
+		Body:      body,
+	})
 }

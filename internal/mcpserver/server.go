@@ -29,12 +29,13 @@ import (
 // Server 包装 SDK server 与调度器。
 type Server struct {
 	manager *session.Manager
+	store   *store.Store
 	log     *slog.Logger
 }
 
 // NewServer 注册全部工具并返回可直接 Run 的 MCP server。
-func NewServer(mgr *session.Manager, log *slog.Logger) *mcp.Server {
-	s := &Server{manager: mgr, log: log}
+func NewServer(mgr *session.Manager, st *store.Store, log *slog.Logger) *mcp.Server {
+	s := &Server{manager: mgr, store: st, log: log}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:        "rigd",
 		Title:       "Acceptance Rig",
@@ -43,8 +44,9 @@ func NewServer(mgr *session.Manager, log *slog.Logger) *mcp.Server {
 	}, nil)
 
 	registerSessionTools(server, s)
-	registerActionTools(server, s)
-	registerAssertTool(server, s)
+	registerRunTool(server, s)
+	registerFeedbackTool(server, s)
+
 	return server
 }
 
@@ -188,131 +190,42 @@ type stepArgs struct {
 	Expect string `json:"expect,omitempty" jsonschema:"期望看到什么（会写进报告，方便对照实际结果）"`
 }
 
-func registerActionTools(server *mcp.Server, s *Server) {
+func registerRunTool(server *mcp.Server, s *Server) {
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "snapshot",
-		Description: "读当前页面结构：可交互元素（带引用号 e1/e2…、角色、可读名称、位置）与可见文本。" +
-			"先用它确定目标，再用引用号点击，不要靠猜坐标。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sessionArgs) (*mcp.CallToolResult, snapshotResult, error) {
-		snap, err := s.doSnapshot(ctx, args)
+		Name: "run",
+		Description: "执行一串动作（1~50 步），中间不回到你这边。只有一个动作时就直接给一步。" +
+			"动作：snapshot 读页面结构 / click 点元素（ref 或 match 文字或 selector）/ fill 填文本 / " +
+			"press_key 按键 / eval 在页面求值 / wait 等条件成立 / screenshot 截图留证 / assert 记一条断言。" +
+			"时效性靠它保证：拖动到 6 秒后立刻截图，两步之间不会隔着你思考的那几十秒。" +
+			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
+			"每一步都会在验收报告里各记一条，和单独调用没有区别。",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args runArgs) (*mcp.CallToolResult, runResult, error) {
+		msg, res, err := s.doRun(ctx, args)
 		if err != nil {
-			return nil, snapshotResult{}, err
+			return nil, runResult{}, err
 		}
-		return text(inspect.Summarize(snap)), snapshotResult{
-			URL: snap.URL, Title: snap.Title, Elements: snap.Elements, Text: snap.Text,
-		}, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "screenshot",
-		Description: "截图作为证据，返回图片本身（同时落盘）。label 写清用途，比如「第3条字幕」。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args screenshotArgs) (*mcp.CallToolResult, screenshotResult, error) {
-		artifact, size, err := s.doScreenshot(ctx, args)
-		if err != nil {
-			return nil, screenshotResult{}, err
+		out := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
+		// 截图类动作把图带上（限 3 张）：没有图，模型只能靠猜画面长什么样
+		for _, r := range res.Steps {
+			if r.Action != "screenshot" || len(out.Content) >= 4 {
+				continue
+			}
+			if path, ok := r.Value.(string); ok && path != "" {
+				if raw, err := os.ReadFile(filepath.Join(mustSessionDir(ctx, s, args.SessionID), path)); err == nil {
+					out.Content = append(out.Content, &mcp.ImageContent{Data: raw, MIMEType: "image/png"})
+				}
+			}
 		}
-		dir, err := s.sessionDir(ctx, args.SessionID)
-		if err != nil {
-			return nil, screenshotResult{}, err
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, artifact))
-		if err != nil {
-			return nil, screenshotResult{}, fmt.Errorf("读取截图失败: %w", err)
-		}
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				&mcp.TextContent{Text: fmt.Sprintf("截图已保存：%s", artifact)},
-				&mcp.ImageContent{Data: raw, MIMEType: "image/png"},
-			},
-		}, screenshotResult{Path: artifact, Bytes: size}, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "click",
-		Description: "点击元素：ref 用 snapshot 给出的 eN；也可以给 x/y 走坐标兜底（原生弹窗、自绘控件）。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args clickArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, err := s.doClick(ctx, args)
-		if err != nil {
-			return nil, actionResult{}, err
-		}
-		return text(msg), actionResult{OK: true, Message: msg}, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "fill",
-		Description: "往输入框填文本（覆盖原内容）。submit=true 时按回车提交。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args fillArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, err := s.doFill(ctx, args)
-		if err != nil {
-			return nil, actionResult{}, err
-		}
-		return text(msg), actionResult{OK: true, Message: msg}, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "press_key",
-		Description: "给当前焦点发按键：Enter / Escape / Space / ArrowRight / ArrowLeft 等。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args pressArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, err := s.doPress(ctx, args)
-		if err != nil {
-			return nil, actionResult{}, err
-		}
-		return text(msg), actionResult{OK: true, Message: msg}, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "eval",
-		Description: "在页面里执行只读 JS 并返回结果，用于精确断言（如读 video.currentTime）。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args evalArgs) (*mcp.CallToolResult, evalResult, error) {
-		pretty, val, err := s.doEval(ctx, args)
-		if err != nil {
-			return nil, evalResult{}, err
-		}
-		return text(pretty), evalResult{Value: val}, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "wait",
-		Description: "在服务端等你给的条件成立（每 100ms 查一次），超时就失败。" +
-			"for 是一个 JS 条件表达式，例如 document.querySelector('.list') || document.body.innerText.includes('失败')。" +
-			"用它代替「先 sleep 再看」：等待期间不需要模型在场。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args waitArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, err := s.doWait(ctx, args)
-		if err != nil {
-			return nil, actionResult{}, err
-		}
-		return text(msg), actionResult{OK: true, Message: msg}, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "batch",
-		Description: "一次调用连续执行多步，中间不回到模型——适合有时效要求的连招：" +
-			"拖动到 6 秒后立刻截图、点完等界面稳定再断言。" +
-			"每一步仍然各记一条报告，和单独调一模一样；遇到失败即停，并告诉你跑到第几步。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args batchArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, ok, err := s.doBatch(ctx, args)
-		if err != nil {
-			return nil, actionResult{}, err
-		}
-		return text(msg), actionResult{OK: ok, Message: msg}, nil
+		return out, res, nil
 	})
 }
 
-func registerAssertTool(server *mcp.Server, s *Server) {
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "assert",
-		Description: "记录一条断言，报告里显示为 ✅/❌。把「你判断的」和「客观证据」分开写：" +
-			"claim 是判断，evidence 是支撑它的数值/文本。这一步同时会截一张图。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args assertArgs) (*mcp.CallToolResult, actionResult, error) {
-		if err := s.doAssert(ctx, args); err != nil {
-			return nil, actionResult{}, err
-		}
-		label := "断言已记录 ✅"
-		if !args.OK {
-			label = "断言已记录 ❌"
-		}
-		return text(label + "：" + args.Claim), actionResult{OK: args.OK, Message: label}, nil
-	})
+func mustSessionDir(ctx context.Context, s *Server, id string) string {
+	dir, err := s.sessionDir(ctx, id)
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 type waitArgs struct {
@@ -322,9 +235,31 @@ type waitArgs struct {
 	TimeoutMS int    `json:"timeoutMs,omitempty" jsonschema:"最长等多久（毫秒），默认 5000，最大 60000"`
 }
 
-type batchArgs struct {
+type runArgs struct {
 	SessionID string      `json:"sessionId" jsonschema:"会话 ID"`
-	Steps     []batchStep `json:"steps" jsonschema:"按顺序执行的步骤（最多 50 步）"`
+	Steps     []batchStep `json:"steps" jsonschema:"按顺序执行的步骤（1~50 步）"`
+}
+
+// runResult 给客户端的结构化结果：每一步的成败、元素表、求值结果。
+type runResult struct {
+	OK        bool            `json:"ok"`
+	Steps     []runStepResult `json:"steps"`
+	StoppedAt int             `json:"stoppedAt,omitempty"`
+}
+
+type runStepResult struct {
+	Index    int               `json:"index"`
+	Action   string            `json:"action"`
+	OK       bool              `json:"ok"`
+	Text     string            `json:"text"`
+	Elements []inspect.Element `json:"elements,omitempty"`
+	Value    any               `json:"value,omitempty"`
+}
+
+type feedbackArgs struct {
+	SessionID string `json:"sessionId,omitempty" jsonschema:"关联的会话 ID（可空）"`
+	Rating    int    `json:"rating,omitempty" jsonschema:"这套工作流用起来的感受，1（难用）~5（好用），可空"`
+	Text      string `json:"text" jsonschema:"具体建议：哪里别扭、缺什么、希望怎么改"`
 }
 
 type screenshotArgs struct {

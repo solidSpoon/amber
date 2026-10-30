@@ -39,7 +39,7 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 
 	cfg := &config.Config{DataDir: t.TempDir(), Image: "x", MaxSessions: 1, CDPPortBase: 39222, VNCPortBase: 36080}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(session.NewManager(cfg, st, noopDocker{}, nil, log), log)
+	server := NewServer(session.NewManager(cfg, st, noopDocker{}, nil, log), st, log)
 
 	tools, err := Catalog(ctx, server)
 	if err != nil {
@@ -54,9 +54,10 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 		}
 	}
 
+	// 工具面刻意只有这四个：会话的开、跑、收 + 对工作流本身的反馈。
+	// 具体动作（点击、读结构、等待…）都走 run 的 steps，不再各占一个工具。
 	want := []string{
-		"assert", "batch", "click", "end_session", "eval", "fill", "list_sessions",
-		"press_key", "screenshot", "snapshot", "start_session", "wait",
+		"end_session", "feedback", "list_sessions", "run", "start_session",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("工具数量 = %d，期望 %d：%v", len(got), len(want), got)

@@ -62,7 +62,7 @@ func main() {
 	manager := session.NewManager(cfg, st, docker, nil, logger)
 
 	if *mode == "true" {
-		runMCP(ctx, manager, logger)
+		runMCP(ctx, st, manager, logger)
 		return
 	}
 	runHTTP(ctx, cfg, st, manager, docker, logger)
@@ -70,8 +70,8 @@ func main() {
 
 // runMCP 把工具面挂到 stdio 上。注意：MCP 模式下不启动 HTTP，管理台与 MCP 是两个进程，
 // 想同时用就开两个——它们共享同一个 sqlite，会话状态不会打架。
-func runMCP(ctx context.Context, manager *session.Manager, logger *slog.Logger) {
-	server := mcpserver.NewServer(manager, logger)
+func runMCP(ctx context.Context, st *store.Store, manager *session.Manager, logger *slog.Logger) {
+	server := mcpserver.NewServer(manager, st, logger)
 	logger.Info("MCP 服务已启动（stdio）")
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("MCP 服务退出", "err", err)
@@ -100,7 +100,7 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 
 	// MCP：HTTP 模式下同时挂一个 Streamable HTTP 接入点，并把连接信息交给页面展示。
 	// 工具清单来自服务自身的 tools/list，页面不会和实现漂移。
-	mcpServer := mcpserver.NewServer(manager, logger)
+	mcpServer := mcpserver.NewServer(manager, st, logger)
 	mcpTools, err := mcpserver.Catalog(ctx, mcpServer)
 	if err != nil {
 		logger.Warn("读取 MCP 工具清单失败，页面将不显示工具列表", "err", err)
