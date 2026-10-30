@@ -207,11 +207,27 @@ func truncateString(s string, limit int) string {
 	return string([]rune(s)[:limit]) + "…"
 }
 
+// HasVisual 这一步值不值得配一张画面。
+//
+// 「读页面结构」「读页面上的值」这类动作不改界面：拍下来是一张和上一步一样的截图，
+// 白占地方，也白花一次抓图的时间。报告里它就该只有文字。
+func HasVisual(tool string) bool {
+	switch tool {
+	case "snapshot", "eval":
+		return false
+	default:
+		return true
+	}
+}
+
 // captureShot 截这一步的画面，返回相对会话目录的路径。
 //
 // 失败也要截：报告里读者最想看的就是「出错时屏幕长什么样」。
 // 截不到不算错误（CDP 断了、应用崩了都可能导致），只是这一步没有图。
 func (m *Manager) captureShot(ctx context.Context, sessDir string, insp Inspector, step Step) string {
+	if !HasVisual(step.Tool) {
+		return ""
+	}
 	shooter, ok := insp.(stepShooter)
 	if !ok {
 		return ""

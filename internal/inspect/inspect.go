@@ -238,7 +238,9 @@ func (c *Client) Screenshot(ctx context.Context, path string) (int64, error) {
 // Summarize 把快照压成一段适合塞进上下文的文本。
 func Summarize(s Snapshot) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "URL: %s\nTITLE: %s\n\nELEMENTS:\n", s.URL, s.Title)
+	// 这里只写人看得懂的东西：页面叫什么、有哪些能点的元素。
+	// 地址栏那种路径信息对读者没有意义，报告里出现只会让人分心。
+	fmt.Fprintf(&b, "页面：%s（%d 个可操作元素）\n\n", s.Title, len(s.Elements))
 	for _, el := range s.Elements {
 		fmt.Fprintf(&b, "%s %s", el.Ref, el.Role)
 		if el.TestID != "" {

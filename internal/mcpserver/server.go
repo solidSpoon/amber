@@ -237,7 +237,9 @@ func registerActionTools(server *mcp.Server, s *Server) {
 					return "", "", err
 				}
 				size = n
-				return fmt.Sprintf("截图已保存：%s（%d 字节）", rel, n), rel, nil
+				// 报告里只写"截了什么"，不写落在哪个文件——路径对读者没用。
+				// 真实路径在 artifact 字段里，要查的时候查得到。
+				return fmt.Sprintf("已截图：%s", args.Label), rel, nil
 			})
 		if err != nil {
 			return nil, screenshotResult{}, err

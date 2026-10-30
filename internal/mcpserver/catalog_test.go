@@ -22,10 +22,10 @@ func (noopDocker) Inspect(context.Context, string) (dockerx.State, error) {
 	return dockerx.State{}, nil
 }
 func (noopDocker) Exec(context.Context, string, ...string) (string, error) { return "", nil }
-func (noopDocker) CountRunning(context.Context, string) (int, error)      { return 0, nil }
-func (noopDocker) Logs(context.Context, string, int) (string, error)      { return "", nil }
-func (noopDocker) Remove(context.Context, string) error                   { return nil }
-func (noopDocker) Stats(context.Context, string) (dockerx.Stats, error)   { return dockerx.Stats{}, nil }
+func (noopDocker) CountRunning(context.Context, string) (int, error)       { return 0, nil }
+func (noopDocker) Logs(context.Context, string, int) (string, error)       { return "", nil }
+func (noopDocker) Remove(context.Context, string) error                    { return nil }
+func (noopDocker) Stats(context.Context, string) (dockerx.Stats, error)    { return dockerx.Stats{}, nil }
 
 // 工具清单是管理台「MCP」页的数据源，必须和真正注册的工具一致。
 // 这条测试直接连服务读 tools/list，防止以后加工具忘了同步页面文档。

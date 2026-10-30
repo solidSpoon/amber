@@ -349,7 +349,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 			OK: e.OK, Kind: e.Kind, Caption: e.Caption, Intent: e.Intent, Expect: e.Expect,
 			DurationMS: e.DurationMS, VideoOffsetMS: e.VideoOffsetMS,
 			Result: e.Result, Artifact: e.ArtifactPath, Shot: e.Shot,
-			Clip: e.VideoOffsetMS >= 0 && hasVideo, Frame: toGeometry(e.Frame),
+			Clip: e.VideoOffsetMS >= 0 && hasVideo && session.HasVisual(e.Tool), Frame: toGeometry(e.Frame),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})

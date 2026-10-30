@@ -52,9 +52,9 @@ type Spec struct {
 
 // State 容器状态摘要。
 type State struct {
-	Running   bool
-	ExitCode  int
-	StartedAt time.Time
+	Running    bool
+	ExitCode   int
+	StartedAt  time.Time
 	FinishedAt time.Time
 }
 

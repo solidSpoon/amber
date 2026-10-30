@@ -175,6 +175,8 @@ function StepRow({
   const isAssert = event.kind === 'assert';
   const isNote = event.kind === 'note';
   const failed = !event.ok;
+  // 读页面结构这类动作不改界面，没有画面；那一行就别留一条空栏
+  const hasMedia = Boolean(event.clip || event.shot);
 
   return (
     <>
@@ -183,7 +185,11 @@ function StepRow({
           · 这之间 {formatClock(gapMs / 1000)} 没有操作（模型在思考） ·
         </li>
       )}
-      <li className="grid gap-3 py-5 md:grid-cols-[minmax(0,1fr)_clamp(340px,46vw,640px)] md:gap-6">
+      <li
+        className={`grid gap-3 py-5 md:gap-6 ${
+          hasMedia ? 'md:grid-cols-[minmax(0,1fr)_clamp(340px,46vw,640px)]' : 'md:grid-cols-1'
+        }`}
+      >
         <div className="min-w-0">
           <div className="flex items-baseline gap-2">
             <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
@@ -210,26 +216,39 @@ function StepRow({
 
           {event.result && !isNote && (
             <div className="mt-1.5">
+              {/* 结果先只给第一行：一句话说清"这一步得到了什么"。
+                  元素清单这类长内容折在「展开」后面，不占版面也不打断节奏。 */}
               <p
-                className={`text-xs leading-relaxed break-words ${event.result.length > 200 && !resultOpen ? 'line-clamp-2' : ''} ${
+                className={`text-xs leading-relaxed break-words whitespace-pre-wrap ${
                   failed ? 'text-destructive' : 'text-muted-foreground'
                 }`}
               >
-                {isAssert ? `证据：${event.result.replace(/^断言(不?)成立：/, '')}` : event.result}
+                {isAssert ? `证据：${resultHead(event.result).replace(/^断言(不?)成立：/, '')}` : resultHead(event.result)}
               </p>
-              {event.result.length > 200 && (
-                <button
-                  onClick={() => setResultOpen((v) => !v)}
-                  className="text-[11px] text-muted-foreground/80 underline-offset-2 hover:underline"
-                >
-                  {resultOpen ? '收起' : '展开完整结果'}
-                </button>
+              {resultRest(event.result) && (
+                <>
+                  {resultOpen && (
+                    <p
+                      className={`mt-1 text-xs leading-relaxed break-words whitespace-pre-wrap ${
+                        failed ? 'text-destructive' : 'text-muted-foreground'
+                      }`}
+                    >
+                      {resultRest(event.result)}
+                    </p>
+                  )}
+                  <button
+                    onClick={() => setResultOpen((v) => !v)}
+                    className="text-[11px] text-muted-foreground/80 underline-offset-2 hover:underline"
+                  >
+                    {resultOpen ? '收起' : '展开完整结果'}
+                  </button>
+                </>
               )}
             </div>
           )}
         </div>
 
-        <StepMedia sessionId={sessionId} event={event} display={display} onZoom={onZoom} />
+        {hasMedia && <StepMedia sessionId={sessionId} event={event} display={display} onZoom={onZoom} />}
       </li>
     </>
   );
@@ -520,6 +539,19 @@ function LogPanel({ sessionId }: { sessionId: string }) {
   );
 }
 
+
+/** 结果的第一行 = 这一步的结论 */
+function resultHead(text: string): string {
+  return text.split('\n').find((line) => line.trim() !== '')?.trim() ?? '';
+}
+
+/** 第一行之外的内容：只在展开时显示 */
+function resultRest(text: string): string {
+  const lines = text.split('\n');
+  const first = lines.findIndex((line) => line.trim() !== '');
+  if (first < 0) return '';
+  return lines.slice(first + 1).join('\n').trim();
+}
 
 /** 与上一步之间的空窗（毫秒）：报告的节奏靠它，不靠录像 */
 function gapBefore(events: SessionEvent[], index: number): number {
