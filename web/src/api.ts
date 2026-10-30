@@ -46,6 +46,9 @@ export interface LogSource {
 export type EventKind = 'action' | 'assert' | 'note';
 
 export interface SessionEvent {
+  /** 这一段连续操作的起止（毫秒，相对录像起点）；同一批的几步共用一条片段 */
+  batchStartMs: number;
+  batchEndMs: number;
   seq: number;
   at: string;
   tool: string;

@@ -61,6 +61,22 @@ export default function SessionDetail({ id }: { id: string }) {
     );
   }
 
+  // 一段连续操作（一次 batch）只放一条片段，挂在这批第一条有画面的步骤上；
+  // 其余步骤只有文字。否则同一段画面会在十几行里各循环一遍。
+  const clipAnchor = new Map<number, number>();
+  {
+    let batch = Number.NaN;
+    let anchor = 0;
+    for (const e of events) {
+      if (e.batchStartMs !== batch) {
+        batch = e.batchStartMs;
+        anchor = 0;
+      }
+      if (!anchor && (e.clip || e.shot)) anchor = e.seq;
+      if (anchor) clipAnchor.set(e.seq, anchor);
+    }
+  }
+
   const asserts = events.filter((e) => e.kind === 'assert');
   const failures = events.filter((e) => !e.ok);
   const lastOffset = events.reduce((max, e) => Math.max(max, e.videoOffsetMs), 0);
@@ -129,6 +145,7 @@ export default function SessionDetail({ id }: { id: string }) {
               event={event}
               gapMs={gapBefore(events, index)}
               display={session.display}
+              isClipAnchor={clipAnchor.get(event.seq) === event.seq}
               onZoom={() => setZoomed(event)}
             />
           ))}
@@ -163,20 +180,22 @@ function StepRow({
   event,
   gapMs,
   display,
+  isClipAnchor,
   onZoom,
 }: {
   sessionId: string;
   event: SessionEvent;
   gapMs: number;
   display?: Session['display'];
+  isClipAnchor: boolean;
   onZoom: () => void;
 }) {
   const [resultOpen, setResultOpen] = useState(false);
   const isAssert = event.kind === 'assert';
   const isNote = event.kind === 'note';
   const failed = !event.ok;
-  // 读页面结构这类动作不改界面，没有画面；那一行就别留一条空栏
-  const hasMedia = Boolean(event.clip || event.shot);
+  // 同一批只有第一条带片段；截图类步骤用自己的截图。
+  const hasMedia = Boolean(event.shot) || (event.clip && isClipAnchor);
 
   return (
     <>
@@ -248,7 +267,15 @@ function StepRow({
           )}
         </div>
 
-        {hasMedia && <StepMedia sessionId={sessionId} event={event} display={display} onZoom={onZoom} />}
+        {hasMedia && (
+          <StepMedia
+            sessionId={sessionId}
+            event={event}
+            display={display}
+            isClipAnchor={isClipAnchor}
+            onZoom={onZoom}
+          />
+        )}
       </li>
     </>
   );
@@ -259,13 +286,17 @@ function StepMedia({
   sessionId,
   event,
   display,
+  isClipAnchor,
   onZoom,
 }: {
   sessionId: string;
   event: SessionEvent;
   display?: Session['display'];
+  isClipAnchor: boolean;
   onZoom: () => void;
 }) {
+  // 同一批共用一条片段，只有这批的第一行放视频，其余步骤用自己那张截图
+  const showClip = Boolean(event.clip) && isClipAnchor;
   const ref = useRef<HTMLVideoElement>(null);
   const [inView, setInView] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -285,7 +316,7 @@ function StepMedia({
     else el.pause();
   }, [inView]);
 
-  if (!event.clip && !event.shot) return <div className="hidden sm:block" />;
+  if (!showClip && !event.shot) return <div className="hidden sm:block" />;
 
   return (
     <button
@@ -294,7 +325,7 @@ function StepMedia({
       title="点开看大图"
       aria-label={`${event.caption} 的画面`}
     >
-      {event.clip ? (
+      {showClip ? (
         <ScreenStage display={display} className="rounded-none border-0">
           <video
             ref={ref}
@@ -318,8 +349,8 @@ function StepMedia({
           className="block aspect-video w-full object-cover"
         />
       )}
-      {event.clip && (
-        // 进度条跟着这 4 秒循环走：一眼看出片段放到了哪，不用等它播完
+      {showClip && (
+        // 进度条跟着片段循环走：一眼看出片段放到了哪，不用等它播完
         <span className="pointer-events-none absolute inset-x-0 bottom-0 h-[3px] bg-black/40">
           <span
             className="block h-full bg-white shadow-[0_0_2px_rgba(0,0,0,0.6)] transition-[width] duration-150 ease-linear"

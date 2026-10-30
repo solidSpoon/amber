@@ -258,12 +258,33 @@ func sanitizeTool(tool string) string {
 
 // clipName 是某一步的短视频文件名（缓存在会话目录里）。
 // 文件名带窗口版本号：切片规则变了，老的缓存不能拿来复用。
-func clipName(seq int) string {
-	return filepath.Join("clips", fmt.Sprintf("step3-%04d.mp4", seq))
+// 文件名按"批次起点"命名：同一批的每一步共用同一条片段，不重复编码。
+//
+// 用批次的原始起点、不是切片起点：切片起点会被 -2 秒截到 0，
+// 早前几步的片段就会撞成同一个文件，互相覆盖。
+func clipName(startMS int64) string {
+	return filepath.Join("clips", fmt.Sprintf("batch-%08d.mp4", startMS))
 }
 
-// clipWindow 算某一步的切片窗口：前后各 2 秒。
+// clipWindow 算一条片段该切哪一段。
+//
+// 单位是"一段连续操作"（一次 run 调用），不是单步：一批里的相邻两步可能只隔
+// 0.2 秒，每步各切前后 2 秒会把同一段画面重复十几遍。一批 = 一条录像，
+// 从这批第一步前 2 秒，到最后一步后 2 秒。
+//
+// 没有批次信息时（老数据、单步写入）退回前后各 2 秒。
 func clipWindow(target store.Event) (startMS, lengthMS int64) {
+	if target.BatchStartMS >= 0 && target.BatchEndMS >= 0 {
+		start := target.BatchStartMS - 2000
+		if start < 0 {
+			start = 0
+		}
+		end := target.BatchEndMS + 2000
+		if end <= start {
+			end = start + 2000
+		}
+		return start, end - start
+	}
 	start := target.VideoOffsetMS - 2000
 	if start < 0 {
 		start = 0
@@ -326,7 +347,12 @@ func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) 
 		return "", fmt.Errorf("这一步没有对应录像")
 	}
 
-	out := filepath.Join(sess.Dir, clipName(seq))
+	startMS, lengthMS := clipWindow(*target)
+	key := target.VideoOffsetMS
+	if target.BatchStartMS >= 0 {
+		key = target.BatchStartMS
+	}
+	out := filepath.Join(sess.Dir, clipName(key))
 	if info, err := os.Stat(out); err == nil && info.Size() > 0 {
 		return out, nil
 	}
@@ -334,7 +360,6 @@ func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) 
 		return "", err
 	}
 
-	startMS, lengthMS := clipWindow(*target)
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-ss", fmt.Sprintf("%.2f", float64(startMS)/1000),

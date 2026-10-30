@@ -498,6 +498,27 @@ func (m *Manager) Events(ctx context.Context, id string) ([]store.Event, error) 
 	return m.store.ListEvents(ctx, id)
 }
 
+// NowOffset 当前时刻相对录像起点的毫秒数（还没有录像时返回 -1）。
+//
+// 批次要用它圈定"这一段连续操作"的起止：一批一条录像，不是每步一条。
+func (m *Manager) NowOffset(id string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	live, ok := m.live[id]
+	if !ok || live.recordingStartMs <= 0 {
+		return -1
+	}
+	return time.Now().UnixMilli() - live.recordingStartMs
+}
+
+// SetBatchWindow 给 [fromSeq, toSeq] 这一段补上批次起止。
+func (m *Manager) SetBatchWindow(ctx context.Context, id string, fromSeq, toSeq int, startMS, endMS int64) error {
+	if fromSeq > toSeq {
+		return nil
+	}
+	return m.store.SetBatchWindow(ctx, id, fromSeq, toSeq, startMS, endMS)
+}
+
 // Touch 记录一次活动，顺延空闲回收时间点。
 func (m *Manager) Touch(id string) {
 	m.mu.Lock()

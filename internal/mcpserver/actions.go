@@ -374,6 +374,13 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
+	// 这一批从哪到哪：切片按这段算，不按单步。
+	batchStartMS := s.manager.NowOffset(a.SessionID)
+	var beforeSeq int
+	if events, err := s.manager.Events(ctx, a.SessionID); err == nil && len(events) > 0 {
+		beforeSeq = events[len(events)-1].Seq
+	}
+
 	var b strings.Builder
 	res := runResult{Steps: make([]runStepResult, 0, len(a.Steps))}
 	for i, st := range a.Steps {
@@ -385,6 +392,7 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 				Index: i + 1, Action: st.Action, OK: false, Text: err.Error(), Elements: extra.Elements, Value: extra.Value,
 			})
 			res.StoppedAt = i + 1
+			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
 			return b.String(), res, nil
 		}
 		fmt.Fprintf(&b, "%d. %s ✓ %s\n", i+1, st.Action, msg)
@@ -403,7 +411,30 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 		fmt.Fprintf(&b, "全部 %d 步执行完成。", len(a.Steps))
 	}
 	res.OK = true
+	s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
 	return b.String(), res, nil
+}
+
+// markBatch 把这一批的起止补进刚写入的事件里。
+//
+// 结束时间只有跑完才知道，所以先写事件、收尾时回填；失败只告警，
+// 最差是这条片段退回"前后各 2 秒"，不影响报告本身。
+func (s *Server) markBatch(ctx context.Context, sid string, beforeSeq int, startMS int64) {
+	if startMS < 0 {
+		return
+	}
+	endMS := s.manager.NowOffset(sid)
+	if endMS < startMS {
+		return
+	}
+	events, err := s.manager.Events(ctx, sid)
+	if err != nil || len(events) == 0 {
+		return
+	}
+	last := events[len(events)-1].Seq
+	if err := s.manager.SetBatchWindow(ctx, sid, beforeSeq+1, last, startMS, endMS); err != nil {
+		s.log.Warn("写入批次区间失败", "session", sid, "err", err)
+	}
 }
 
 func registerFeedbackTool(server *mcp.Server, s *Server) {

@@ -333,6 +333,9 @@ type eventDTO struct {
 	Clip bool   `json:"clip"`
 	// Frame 这一步当时窗口的矩形（裁剪用；窗口中途变过也不会错位）
 	Frame *geometryDTO `json:"frame,omitempty"`
+	// BatchStartMS/BatchEndMS 这一段连续操作的起止：同一批的几步共用一条片段
+	BatchStartMS int64 `json:"batchStartMs"`
+	BatchEndMS   int64 `json:"batchEndMs"`
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +354,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 			DurationMS: e.DurationMS, VideoOffsetMS: e.VideoOffsetMS,
 			Result: e.Result, Artifact: e.ArtifactPath, Shot: e.Shot,
 			Clip: e.VideoOffsetMS >= 0 && hasVideo && session.HasVisual(e.Tool), Frame: toGeometry(e.Frame),
+			BatchStartMS: e.BatchStartMS, BatchEndMS: e.BatchEndMS,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})

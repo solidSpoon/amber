@@ -124,6 +124,10 @@ type Event struct {
 	Shot string
 	// Frame 写这条记录时窗口的矩形。窗口会在会话中途变，裁剪必须按"当时"的几何来。
 	Frame Rect
+	// BatchStartMS / BatchEndMS 这条记录所属那段连续操作的起止（相对录像起点）。
+	// 切片按这段来：一批一条录像，而不是每步一条。
+	BatchStartMS int64
+	BatchEndMS   int64
 }
 
 // Artifact 会话产物（截图/录像/报告）。
@@ -423,12 +427,13 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events
 		(session_id, seq, at, tool, args, ok, kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot,
-		 frame_x, frame_y, frame_w, frame_h)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 frame_x, frame_y, frame_w, frame_h, batch_start_ms, batch_end_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, seq, e.At.UTC().Format(time.RFC3339Nano), e.Tool, args, ok,
 		e.Kind, e.Caption, e.Intent, e.Expect,
 		e.DurationMS, e.VideoOffsetMS, e.Result, e.ArtifactPath, e.Shot,
-		e.Frame.X, e.Frame.Y, e.Frame.Width, e.Frame.Height); err != nil {
+		e.Frame.X, e.Frame.Y, e.Frame.Width, e.Frame.Height,
+		orDefault(e.BatchStartMS), orDefault(e.BatchEndMS)); err != nil {
 		return 0, fmt.Errorf("写入事件失败: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -437,11 +442,28 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 	return seq, nil
 }
 
+// SetBatchWindow 给一段连续操作（一次 run 调用）补上起止位置。
+//
+// 批次是切片的单位：一批一条录像，从第一步前 2 秒到最后一步后 2 秒。
+// 起止要等这一批跑完才知道，所以先写事件、结束后再补。
+func (s *Store) SetBatchWindow(ctx context.Context, sessionID string, fromSeq, toSeq int, startMS, endMS int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE events SET batch_start_ms = ?, batch_end_ms = ?
+		WHERE session_id = ? AND seq BETWEEN ? AND ?`, startMS, endMS, sessionID, fromSeq, toSeq)
+	if err != nil {
+		return fmt.Errorf("写入批次区间失败: %w", err)
+	}
+	return nil
+}
+
+func orDefault(v int64) int64 {
+	return v
+}
+
 // ListEvents 返回会话的全部事件，按 seq 升序。
 func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, seq, at, tool, args, ok,
 		kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot,
-		frame_x, frame_y, frame_w, frame_h
+		frame_x, frame_y, frame_w, frame_h, batch_start_ms, batch_end_ms
 		FROM events WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("查询事件失败: %w", err)
@@ -459,7 +481,8 @@ func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, erro
 		if err := rows.Scan(&e.ID, &e.SessionID, &e.Seq, &at, &e.Tool, &args, &ok,
 			&e.Kind, &e.Caption, &e.Intent, &e.Expect,
 			&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath, &e.Shot,
-			&e.Frame.X, &e.Frame.Y, &e.Frame.Width, &e.Frame.Height); err != nil {
+			&e.Frame.X, &e.Frame.Y, &e.Frame.Width, &e.Frame.Height,
+			&e.BatchStartMS, &e.BatchEndMS); err != nil {
 			return nil, fmt.Errorf("扫描事件失败: %w", err)
 		}
 		e.Args = json.RawMessage(args)
