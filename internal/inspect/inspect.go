@@ -192,6 +192,11 @@ func (c *Client) Press(ctx context.Context, key string) error {
 	return c.cdp.KeyPress(ctx, key)
 }
 
+// MaximizeWindow 让应用窗口铺满虚拟屏（高分辨率下避免四周空白）。
+func (c *Client) MaximizeWindow(ctx context.Context) error {
+	return c.cdp.MaximizeWindow(ctx)
+}
+
 // Evaluate 执行只读 JS 并返回原始 JSON。
 func (c *Client) Evaluate(ctx context.Context, script string) (json.RawMessage, error) {
 	return c.cdp.Evaluate(ctx, script)
@@ -199,7 +204,8 @@ func (c *Client) Evaluate(ctx context.Context, script string) (json.RawMessage, 
 
 // PreviewJPEG 只取一帧 JPEG（不落盘），给看板的实时预览用。
 func (c *Client) PreviewJPEG(ctx context.Context, quality int) ([]byte, error) {
-	data, err := c.cdp.ScreenshotJPEG(ctx, quality)
+	// 看板上的缩略屏最大 960 宽就够了，再大既看不清也用不上
+	data, err := c.cdp.ScreenshotJPEGScaled(ctx, quality, 960)
 	if err != nil {
 		return nil, err
 	}

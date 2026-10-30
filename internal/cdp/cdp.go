@@ -156,6 +156,45 @@ func (c *Client) readLoop() {
 	}
 }
 
+// viewport 取当前页面视口尺寸（失败返回 0，调用方按原尺寸处理）。
+func (c *Client) viewport(ctx context.Context) (float64, float64) {
+	var metrics struct {
+		CSSLayoutViewport struct {
+			ClientWidth  float64 `json:"clientWidth"`
+			ClientHeight float64 `json:"clientHeight"`
+		} `json:"cssLayoutViewport"`
+	}
+	if err := c.Call(ctx, "Page.getLayoutMetrics", nil, &metrics); err != nil {
+		return 0, 0
+	}
+	return metrics.CSSLayoutViewport.ClientWidth, metrics.CSSLayoutViewport.ClientHeight
+}
+
+// MaximizeWindow 让应用窗口铺满虚拟屏。
+//
+// 高分辨率下应用窗口默认尺寸不会自动变大，屏幕四周会留一大片空桌面——
+// 录屏和预览里那部分纯属浪费，所以这里显式最大化一次（失败只告警，不阻断会话）。
+func (c *Client) MaximizeWindow(ctx context.Context) error {
+	var target struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := c.Call(ctx, "Browser.getWindowForTarget", nil, &target); err != nil {
+		return err
+	}
+	if target.TargetID == "" {
+		return nil
+	}
+	var window struct {
+		WindowID int `json:"windowId"`
+	}
+	if err := c.Call(ctx, "Browser.getWindowForTarget", nil, &window); err != nil {
+		return err
+	}
+	return c.Call(ctx, "Browser.setWindowBounds", map[string]any{
+		"windowId": window.WindowID, "bounds": map[string]any{"windowState": "maximized"},
+	}, nil)
+}
+
 // Call 发一个 CDP 命令并等结果。params 可以为 nil。
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
 	c.mu.Lock()
@@ -240,10 +279,32 @@ func (c *Client) ScreenshotJPEG(ctx context.Context, quality int) (string, error
 	return c.capture(ctx, "jpeg", quality)
 }
 
+// ScreenshotJPEGScaled 截 JPEG 并按 maxWidth 等比缩放（预览用）。
+func (c *Client) ScreenshotJPEGScaled(ctx context.Context, quality, maxWidth int) (string, error) {
+	return c.captureScaled(ctx, "jpeg", quality, maxWidth)
+}
+
 func (c *Client) capture(ctx context.Context, format string, quality int) (string, error) {
+	return c.captureScaled(ctx, format, quality, 0)
+}
+
+// captureScaled 按目标宽度等比缩放截图；maxWidth<=0 表示原始尺寸。
+//
+// 用 CDP 的 clip.scale 而不是截完再缩：1920 宽的画面在 2fps 推流下体积很可观，
+// 让内核直接按缩放渲染比"传完再压缩"省一大截带宽和 CPU。
+func (c *Client) captureScaled(ctx context.Context, format string, quality, maxWidth int) (string, error) {
 	params := map[string]any{"format": format}
 	if quality > 0 {
 		params["quality"] = quality
+	}
+	if maxWidth > 0 {
+		if width, height := c.viewport(ctx); width > 0 && width > float64(maxWidth) {
+			scale := float64(maxWidth) / width
+			params["clip"] = map[string]any{
+				"x": 0, "y": 0, "width": width, "height": height,
+				"scale": scale,
+			}
+		}
 	}
 	var out struct {
 		Data string `json:"data"`

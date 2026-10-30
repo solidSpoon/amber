@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -273,6 +274,19 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		}
 		m.log.Error("会话启动失败", "session", id, "err", readyErr)
 		return sess, readyErr
+	}
+
+	// 高分辨率下应用窗口不会自动变大，显式最大化——而且必须等到真的生效。
+	// setWindowBounds 是异步的：不等的话，紧接着的第一张截图仍然是应用默认窗口大小
+	// （DashPlayer 是 960x540），录屏里也会留下一个小窗口。
+	if maximizer, ok := inspector.(interface {
+		MaximizeWindow(ctx context.Context) error
+	}); ok {
+		if err := maximizer.MaximizeWindow(ctx); err != nil {
+			m.log.Warn("最大化应用窗口失败", "session", id, "err", err)
+		} else if err := waitViewport(ctx, inspector, m.cfg.Display.Width); err != nil {
+			m.log.Warn("等待窗口铺满超时，会话仍继续", "session", id, "err", err)
+		}
 	}
 
 	sess.Status = store.StatusReady
@@ -926,4 +940,27 @@ func (m *Manager) archiveContainerLogs(ctx context.Context, container, sessionDi
 		return "", err
 	}
 	return path, nil
+}
+
+// waitViewport 等窗口视口宽度达到屏幕宽度（最多 8 秒）。
+//
+// 靠轮询 window.innerWidth 而不是睡固定时间：不同应用窗口大小不一，
+// 睡短了截图还是小窗，睡长了白白拖慢每个会话。
+func waitViewport(ctx context.Context, insp Inspector, want int) error {
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := insp.Evaluate(ctx, "window.innerWidth")
+		if err == nil {
+			width, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if parseErr == nil && width >= want {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("窗口宽度未在 8s 内达到 %d", want)
 }
