@@ -89,9 +89,14 @@ export default function SessionDetail({ id }: { id: string }) {
           )}
           {failures.length > 0 && <span className="text-destructive">{failures.length} 步失败</span>}
           {lastOffset > 0 && <span>录像 {formatClock(lastOffset / 1000)}</span>}
+          {session.display && (
+            <span>
+              屏幕 {session.display.width}×{session.display.height}
+            </span>
+          )}
           {session.frame && (
             <span>
-              画幅 {session.frame.width}×{session.frame.height}
+              应用窗口 {session.frame.width}×{session.frame.height}
             </span>
           )}
         </div>
@@ -271,9 +276,7 @@ function StepMedia({
       aria-label={`${event.caption} 的画面`}
     >
       {event.clip ? (
-        // 按"这一步当时"的窗口矩形裁剪：窗口中途变过（登录后切全屏），
-        // 用整场最后的几何去裁前面的片段会裁出「窗口 + 一圈黑边」
-        <ScreenStage frame={event.frame} display={display} className="rounded-none border-0">
+        <ScreenStage display={display} className="rounded-none border-0">
           <video
             ref={ref}
             src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
@@ -339,7 +342,7 @@ function Lightbox({
     >
       {event.clip ? (
         <div className="w-[min(90vw,1100px)]" onClick={(e) => e.stopPropagation()}>
-          <ScreenStage frame={event.frame} display={display}>
+          <ScreenStage display={display}>
             <video
               src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
               autoPlay
@@ -392,7 +395,7 @@ function VideoAppendix({ session }: { session: Session }) {
 
   return (
     <div className="flex flex-col gap-3">
-      <ScreenStage frame={session.frame} display={session.display}>
+      <ScreenStage display={session.display}>
         <video
           ref={videoRef}
           preload="metadata"
@@ -516,6 +519,7 @@ function LogPanel({ sessionId }: { sessionId: string }) {
     </Card>
   );
 }
+
 
 /** 与上一步之间的空窗（毫秒）：报告的节奏靠它，不靠录像 */
 function gapBefore(events: SessionEvent[], index: number): number {
