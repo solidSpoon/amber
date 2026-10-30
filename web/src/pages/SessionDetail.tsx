@@ -66,7 +66,7 @@ export default function SessionDetail({ id }: { id: string }) {
   const lastOffset = events.reduce((max, e) => Math.max(max, e.videoOffsetMs), 0);
 
   return (
-    <div className="mx-auto flex max-w-4xl flex-col gap-6">
+    <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Button variant="ghost" size="sm" render={<a href="#/sessions" />}>
@@ -183,7 +183,7 @@ function StepRow({
           · 这之间 {formatClock(gapMs / 1000)} 没有操作（模型在思考） ·
         </li>
       )}
-      <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_340px] sm:gap-6">
+      <li className="grid gap-3 py-5 md:grid-cols-[minmax(0,1fr)_clamp(340px,46vw,640px)] md:gap-6">
         <div className="min-w-0">
           <div className="flex items-baseline gap-2">
             <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
