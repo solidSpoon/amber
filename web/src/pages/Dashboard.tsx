@@ -5,6 +5,7 @@ import {
   formatBytes,
   machineName,
   type Machine,
+  type RuntimeInfo,
   type Sample,
   type Session,
 } from '../api';
@@ -20,17 +21,24 @@ export default function Dashboard() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [info, setInfo] = useState<RuntimeInfo | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let alive = true;
     async function load() {
       try {
-        const [m, s, list] = await Promise.all([api.machines(), api.metrics(), api.listSessions()]);
+        const [m, s, list, meta] = await Promise.all([
+          api.machines(),
+          api.metrics(),
+          api.listSessions(),
+          api.info(),
+        ]);
         if (!alive) return;
         setMachines(m.machines ?? []);
         setSamples(s.samples ?? []);
         setSessions((list.sessions ?? []).slice(0, 5));
+        setInfo(meta);
         setError('');
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : String(err));
@@ -66,7 +74,7 @@ export default function Dashboard() {
           </div>
         )}
         {machines.map((m) => (
-          <MachineCard key={m.slot} machine={m} />
+          <MachineCard key={m.slot} machine={m} display={info?.display} />
         ))}
       </section>
 
@@ -162,7 +170,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
  * 拟物要克制：只做"这块是屏幕"的暗示（内凹、圆角、轻微内阴影、屏幕反光），
  * 不加渐变色块和花哨装饰，否则在浅色界面里会显脏。
  */
-function MachineCard({ machine }: { machine: Machine }) {
+function MachineCard({ machine, display }: { machine: Machine; display?: { width: number; height: number } }) {
   const online = machine.occupied && (machine.status === 'ready' || machine.status === 'starting');
   const screenRef = useRef<HTMLImageElement>(null);
   const [streamFailed, setStreamFailed] = useState(false);
@@ -175,17 +183,23 @@ function MachineCard({ machine }: { machine: Machine }) {
   const screenSrc = machine.sessionId ? `/api/sessions/${machine.sessionId}/screen.mjpg` : '';
 
   return (
-    <article className="flex flex-col items-center">
+    <article className="mx-auto flex w-full max-w-[880px] flex-col items-center">
       {/* 机身 */}
       <div className="w-full rounded-[26px] bg-gradient-to-b from-neutral-200 to-neutral-300 p-3 shadow-[0_18px_40px_-24px_rgba(0,0,0,0.45)] ring-1 ring-black/5">
         {/* 屏幕（内凹） */}
-        <div className="relative aspect-[16/10] overflow-hidden rounded-[16px] bg-neutral-950 shadow-inner ring-1 ring-black/40">
+        {/* 屏幕按真实分辨率画：1920x1080 就是 16:9，1280x800 就是 16:10，不写死 */}
+        <div
+          className="relative overflow-hidden rounded-[16px] bg-neutral-950 shadow-inner ring-1 ring-black/40"
+          style={{ aspectRatio: display ? `${display.width} / ${display.height}` : '16 / 9' }}
+        >
           {online && screenSrc && !streamFailed ? (
             <img
               ref={screenRef}
               src={screenSrc}
               alt={`${machineName(machine.slot)} 实时画面`}
-              className="h-full w-full object-cover"
+              // contain 而不是 cover：屏幕尺寸随分辨率变（1280x800 / 1920x1080），
+              // cover 会按框裁掉两侧，应用自己的侧边栏就被切没了
+              className="h-full w-full object-contain"
               onError={() => setStreamFailed(true)}
             />
           ) : (

@@ -56,6 +56,14 @@ export interface Machine {
   statsOk: boolean;
 }
 
+/** 运行时信息：虚拟屏尺寸等（看板按真实比例画显示器） */
+export interface RuntimeInfo {
+  display: { width: number; height: number };
+  record: { fps: number; crf: number };
+  maxSessions: number;
+  idleTimeout: string;
+}
+
 export interface Sample {
   at: string;
   cpuPct: number;
@@ -97,6 +105,7 @@ export const api = {
   listEvents: (id: string) => get<{ events: SessionEvent[] }>(`/api/sessions/${id}/events`),
   metrics: () => get<{ samples: Sample[] }>('/api/system/metrics'),
   machines: () => get<{ machines: Machine[] }>('/api/machines'),
+  info: () => get<RuntimeInfo>('/api/info'),
 };
 
 /** 订阅 SSE；返回取消函数，组件卸载时调用。 */

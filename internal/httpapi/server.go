@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/stream", s.streamSessions)
 		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
 		api.Get("/machines", s.machines)
+		api.Get("/info", s.info)
 		api.Get("/mcp", s.mcpInfo)
 		api.Get("/system/metrics", s.systemMetrics)
 		api.Get("/system/stream", s.streamSystem)
@@ -477,6 +478,22 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// info 运行时信息：虚拟屏几何、并发上限等，看板据此画出与真实分辨率同比例的"显示器"。
+func (s *Server) info(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"display": map[string]int{
+			"width":  s.cfg.Display.Width,
+			"height": s.cfg.Display.Height,
+		},
+		"record": map[string]int{
+			"fps": s.cfg.Record.FPS,
+			"crf": s.cfg.Record.CRF,
+		},
+		"maxSessions": s.cfg.MaxSessions,
+		"idleTimeout": s.cfg.IdleTimeout.String(),
+	})
 }
 
 // machines 看板首页的数据源：固定槽位的两台（或多台）候选机器。

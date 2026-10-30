@@ -844,6 +844,14 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		cancel()
 		if dialErr == nil {
 			live.inspector = inspector
+			// 重启后窗口状态可能已丢，重新铺满一次（失败无所谓，下次截图能看出来）
+			if maximizer, ok := inspector.(interface {
+				MaximizeWindow(ctx context.Context) error
+			}); ok {
+				if err := maximizer.MaximizeWindow(ctx); err == nil {
+					_ = waitViewport(ctx, inspector, m.cfg.Display.Width)
+				}
+			}
 		} else {
 			m.log.Warn("接管会话时连接调试端口失败，会话标记为失败", "session", sess.ID, "err", dialErr)
 			sess.Status = store.StatusFailed
