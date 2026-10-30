@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,9 @@ type Snapshot struct {
 type Client struct {
 	cdp  *cdp.Client
 	refs map[string]Element
+	// nextQuery 给「按文字/选择器现找」的元素编号（q1、q2…），
+	// 和 snapshot 的 eN 共用一个表，后续操作不用区分来源。
+	nextQuery int
 }
 
 // Factory 按端口创建检查器；抽出接口是为了让调度器可以在测试里注入假实现。
@@ -144,6 +148,78 @@ func (c *Client) Resolve(ref string) (Element, error) {
 		return Element{}, fmt.Errorf("元素引用 %q 已失效，请重新 snapshot", ref)
 	}
 	return el, nil
+}
+
+// locateScript 按「可见文字」或「CSS 选择器」现找元素。
+//
+// 为什么需要它：引用号是某一次 snapshot 的产物，页面一变就作废。批里
+// 「点完这步、页面翻页、再点下一步」这种连招，根本没法事先写出引用号。
+const locateScript = `(() => {
+  const SEL = 'button,a[href],input,textarea,select,[role],[data-testid],[data-slot]';
+  const nameOf = (el) => (el.getAttribute('aria-label') || el.getAttribute('placeholder')
+    || el.getAttribute('title') || (el.innerText || '').replace(/\s+/g, ' ').trim()
+    || el.value || '').slice(0, 120);
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const roleOf = (el) => {
+    const explicit = el.getAttribute('role');
+    if (explicit) return explicit;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'button') return 'button';
+    if (tag === 'a') return 'link';
+    if (tag === 'input') return el.type === 'text' || !el.type ? 'textbox' : el.type;
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'select') return 'combobox';
+    return tag;
+  };
+  const wanted = %s;
+  const selector = %s;
+  const candidates = [...document.querySelectorAll(SEL)].filter(visible);
+  let el = null;
+  if (selector) {
+    el = candidates.find((e) => e.matches(selector)) || document.querySelector(selector);
+  } else {
+    el = candidates.find((e) => nameOf(e) === wanted) || candidates.find((e) => nameOf(e).includes(wanted));
+  }
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { role: roleOf(el), name: nameOf(el), box: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] };
+})()`
+
+// Locate 按文字或选择器找元素，并登记成一个引用号。
+//
+// 登记之后它和 snapshot 给的引用完全一样：点击、填写、截图高亮、报告里那句
+// 「点击「Skip」按钮」都走同一条路，不会多出第二套"按文字点"的实现。
+func (c *Client) Locate(ctx context.Context, match, selector string) (string, error) {
+	if match == "" && selector == "" {
+		return "", errors.New("需要 match（可见文字）或 selector（CSS 选择器）之一")
+	}
+	matchJSON, _ := json.Marshal(match)
+	selectorJSON, _ := json.Marshal(selector)
+	script := fmt.Sprintf(locateScript, matchJSON, selectorJSON)
+	raw, err := c.cdp.Evaluate(ctx, script)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		what := match
+		if selector != "" {
+			what = selector
+		}
+		return "", fmt.Errorf("页面上找不到「%s」", what)
+	}
+	var el Element
+	if err := json.Unmarshal(raw, &el); err != nil {
+		return "", fmt.Errorf("解析定位结果失败: %w", err)
+	}
+	c.nextQuery++
+	ref := fmt.Sprintf("q%d", c.nextQuery)
+	el.Ref = ref
+	c.refs[ref] = el
+	return ref, nil
 }
 
 // Click 点击引用号对应的元素（先滚动到可见，再按中心点派发真实鼠标事件）。

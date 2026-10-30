@@ -11,7 +11,6 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -195,17 +194,7 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Description: "读当前页面结构：可交互元素（带引用号 e1/e2…、角色、可读名称、位置）与可见文本。" +
 			"先用它确定目标，再用引用号点击，不要靠猜坐标。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sessionArgs) (*mcp.CallToolResult, snapshotResult, error) {
-		var snap inspect.Snapshot
-		_, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
-			Tool: "snapshot", Args: map[string]any{}, Intent: args.Intent, Expect: args.Expect,
-		}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
-			got, err := insp.Snapshot(ctx)
-			if err != nil {
-				return "", "", err
-			}
-			snap = got
-			return inspect.Summarize(got), "", nil
-		})
+		snap, err := s.doSnapshot(ctx, args)
 		if err != nil {
 			return nil, snapshotResult{}, err
 		}
@@ -218,34 +207,15 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "screenshot",
 		Description: "截图作为证据，返回图片本身（同时落盘）。label 写清用途，比如「第3条字幕」。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args screenshotArgs) (*mcp.CallToolResult, screenshotResult, error) {
-		name := sanitizeLabel(args.Label)
-		rel := filepath.Join("screenshots", fmt.Sprintf("%s-%s.png", time.Now().Format("150405"), name))
-
-		var path string
-		var size int64
-		_, artifact, err := s.manager.Record(ctx, args.SessionID, session.Step{
-			Tool: "screenshot", Args: map[string]any{"label": args.Label}, Intent: args.Intent, Expect: args.Expect,
-		},
-			func(ctx context.Context, insp session.Inspector) (string, string, error) {
-				dir, err := s.sessionDir(ctx, args.SessionID)
-				if err != nil {
-					return "", "", err
-				}
-				path = filepath.Join(dir, rel)
-				n, err := insp.Screenshot(ctx, path)
-				if err != nil {
-					return "", "", err
-				}
-				size = n
-				// 报告里只写"截了什么"，不写落在哪个文件——路径对读者没用。
-				// 真实路径在 artifact 字段里，要查的时候查得到。
-				return fmt.Sprintf("已截图：%s", args.Label), rel, nil
-			})
+		artifact, size, err := s.doScreenshot(ctx, args)
 		if err != nil {
 			return nil, screenshotResult{}, err
 		}
-
-		raw, err := os.ReadFile(path)
+		dir, err := s.sessionDir(ctx, args.SessionID)
+		if err != nil {
+			return nil, screenshotResult{}, err
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, artifact))
 		if err != nil {
 			return nil, screenshotResult{}, fmt.Errorf("读取截图失败: %w", err)
 		}
@@ -261,25 +231,7 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "click",
 		Description: "点击元素：ref 用 snapshot 给出的 eN；也可以给 x/y 走坐标兜底（原生弹窗、自绘控件）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args clickArgs) (*mcp.CallToolResult, actionResult, error) {
-		if args.Ref == "" && (args.X == 0 && args.Y == 0) {
-			return nil, actionResult{}, errors.New("ref 与 x/y 至少要给一个")
-		}
-		msg, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
-			Tool: "click", Args: map[string]any{"ref": args.Ref, "x": args.X, "y": args.Y},
-			Intent: args.Intent, Expect: args.Expect, ShotRef: args.Ref,
-		},
-			func(ctx context.Context, insp session.Inspector) (string, string, error) {
-				if args.Ref != "" {
-					if err := insp.Click(ctx, args.Ref); err != nil {
-						return "", "", err
-					}
-					return "已点击 " + args.Ref, "", nil
-				}
-				if err := insp.ClickAt(ctx, args.X, args.Y); err != nil {
-					return "", "", err
-				}
-				return fmt.Sprintf("已点击坐标 (%.0f, %.0f)", args.X, args.Y), "", nil
-			})
+		msg, err := s.doClick(ctx, args)
 		if err != nil {
 			return nil, actionResult{}, err
 		}
@@ -290,21 +242,7 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "fill",
 		Description: "往输入框填文本（覆盖原内容）。submit=true 时按回车提交。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args fillArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
-			Tool: "fill", Args: map[string]any{"ref": args.Ref, "text": args.Text, "submit": args.Submit},
-			Intent: args.Intent, Expect: args.Expect, ShotRef: args.Ref,
-		},
-			func(ctx context.Context, insp session.Inspector) (string, string, error) {
-				if err := insp.Fill(ctx, args.Ref, args.Text); err != nil {
-					return "", "", err
-				}
-				if args.Submit {
-					if err := insp.Press(ctx, "Enter"); err != nil {
-						return "", "", err
-					}
-				}
-				return fmt.Sprintf("已填入 %q", args.Text), "", nil
-			})
+		msg, err := s.doFill(ctx, args)
 		if err != nil {
 			return nil, actionResult{}, err
 		}
@@ -315,15 +253,7 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "press_key",
 		Description: "给当前焦点发按键：Enter / Escape / Space / ArrowRight / ArrowLeft 等。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args pressArgs) (*mcp.CallToolResult, actionResult, error) {
-		msg, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
-			Tool: "press_key", Args: map[string]any{"key": args.Key}, Intent: args.Intent, Expect: args.Expect,
-		},
-			func(ctx context.Context, insp session.Inspector) (string, string, error) {
-				if err := insp.Press(ctx, args.Key); err != nil {
-					return "", "", err
-				}
-				return "已按键 " + args.Key, "", nil
-			})
+		msg, err := s.doPress(ctx, args)
 		if err != nil {
 			return nil, actionResult{}, err
 		}
@@ -334,26 +264,37 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "eval",
 		Description: "在页面里执行只读 JS 并返回结果，用于精确断言（如读 video.currentTime）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args evalArgs) (*mcp.CallToolResult, evalResult, error) {
-		var out any
-		_, _, err := s.manager.Record(ctx, args.SessionID, session.Step{
-			Tool: "eval", Args: map[string]any{"script": args.Script}, Intent: args.Intent, Expect: args.Expect,
-		},
-			func(ctx context.Context, insp session.Inspector) (string, string, error) {
-				raw, err := insp.Evaluate(ctx, args.Script)
-				if err != nil {
-					return "", "", err
-				}
-				// 原样保留 JSON（对象/数组/标量），既给模型看文本也给客户端结构化值
-				if err := json.Unmarshal(raw, &out); err != nil {
-					out = string(raw)
-				}
-				return string(raw), "", nil
-			})
+		pretty, val, err := s.doEval(ctx, args)
 		if err != nil {
 			return nil, evalResult{}, err
 		}
-		pretty, _ := json.Marshal(out)
-		return text(string(pretty)), evalResult{Value: out}, nil
+		return text(pretty), evalResult{Value: val}, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "wait",
+		Description: "在服务端等你给的条件成立（每 100ms 查一次），超时就失败。" +
+			"for 是一个 JS 条件表达式，例如 document.querySelector('.list') || document.body.innerText.includes('失败')。" +
+			"用它代替「先 sleep 再看」：等待期间不需要模型在场。",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args waitArgs) (*mcp.CallToolResult, actionResult, error) {
+		msg, err := s.doWait(ctx, args)
+		if err != nil {
+			return nil, actionResult{}, err
+		}
+		return text(msg), actionResult{OK: true, Message: msg}, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "batch",
+		Description: "一次调用连续执行多步，中间不回到模型——适合有时效要求的连招：" +
+			"拖动到 6 秒后立刻截图、点完等界面稳定再断言。" +
+			"每一步仍然各记一条报告，和单独调一模一样；遇到失败即停，并告诉你跑到第几步。",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args batchArgs) (*mcp.CallToolResult, actionResult, error) {
+		msg, ok, err := s.doBatch(ctx, args)
+		if err != nil {
+			return nil, actionResult{}, err
+		}
+		return text(msg), actionResult{OK: ok, Message: msg}, nil
 	})
 }
 
@@ -363,10 +304,7 @@ func registerAssertTool(server *mcp.Server, s *Server) {
 		Description: "记录一条断言，报告里显示为 ✅/❌。把「你判断的」和「客观证据」分开写：" +
 			"claim 是判断，evidence 是支撑它的数值/文本。这一步同时会截一张图。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args assertArgs) (*mcp.CallToolResult, actionResult, error) {
-		if strings.TrimSpace(args.Claim) == "" {
-			return nil, actionResult{}, errors.New("claim 不能为空")
-		}
-		if err := s.manager.Assert(ctx, args.SessionID, args.Claim, args.OK, args.Evidence); err != nil {
+		if err := s.doAssert(ctx, args); err != nil {
 			return nil, actionResult{}, err
 		}
 		label := "断言已记录 ✅"
@@ -375,6 +313,18 @@ func registerAssertTool(server *mcp.Server, s *Server) {
 		}
 		return text(label + "：" + args.Claim), actionResult{OK: args.OK, Message: label}, nil
 	})
+}
+
+type waitArgs struct {
+	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
+	stepArgs
+	For       string `json:"for" jsonschema:"等它成立的 JS 条件表达式"`
+	TimeoutMS int    `json:"timeoutMs,omitempty" jsonschema:"最长等多久（毫秒），默认 5000，最大 60000"`
+}
+
+type batchArgs struct {
+	SessionID string      `json:"sessionId" jsonschema:"会话 ID"`
+	Steps     []batchStep `json:"steps" jsonschema:"按顺序执行的步骤（最多 50 步）"`
 }
 
 type screenshotArgs struct {
@@ -391,17 +341,21 @@ type screenshotResult struct {
 type clickArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
 	stepArgs
-	Ref string  `json:"ref,omitempty" jsonschema:"元素引用号，如 e3"`
-	X   float64 `json:"x,omitempty" jsonschema:"页面坐标 X（兜底方案）"`
-	Y   float64 `json:"y,omitempty" jsonschema:"页面坐标 Y（兜底方案）"`
+	Ref      string  `json:"ref,omitempty" jsonschema:"元素引用号，如 e3（snapshot 给的）"`
+	Match    string  `json:"match,omitempty" jsonschema:"按可见文字找元素（如「Skip」），页面刚变、还没有引用号时用它"`
+	Selector string  `json:"selector,omitempty" jsonschema:"按 CSS 选择器找元素"`
+	X        float64 `json:"x,omitempty" jsonschema:"页面坐标 X（兜底方案）"`
+	Y        float64 `json:"y,omitempty" jsonschema:"页面坐标 Y（兜底方案）"`
 }
 
 type fillArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
 	stepArgs
-	Ref    string `json:"ref" jsonschema:"元素引用号"`
-	Text   string `json:"text" jsonschema:"要输入的文字"`
-	Submit bool   `json:"submit,omitempty" jsonschema:"是否回车提交"`
+	Ref      string `json:"ref,omitempty" jsonschema:"元素引用号"`
+	Match    string `json:"match,omitempty" jsonschema:"按可见文字找输入框"`
+	Selector string `json:"selector,omitempty" jsonschema:"按 CSS 选择器找输入框"`
+	Text     string `json:"text" jsonschema:"要输入的文字"`
+	Submit   bool   `json:"submit,omitempty" jsonschema:"是否回车提交"`
 }
 
 type pressArgs struct {

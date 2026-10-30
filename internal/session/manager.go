@@ -507,6 +507,20 @@ func (m *Manager) Touch(id string) {
 	}
 }
 
+// Describe 取引用号对应的元素（供上层把「已点击 e5」写成元素名）。
+func (m *Manager) Describe(insp Inspector, ref string) (inspect.Element, bool) {
+	describer, ok := insp.(describeElement)
+	if !ok || ref == "" {
+		return inspect.Element{}, false
+	}
+	return describer.Describe(ref)
+}
+
+// Inspector 取（必要时重建）检查器，供上层在录制一步之前先做定位。
+func (m *Manager) Inspector(ctx context.Context, id string) (Inspector, error) {
+	return m.inspector(ctx, id)
+}
+
 // inspector 取（必要时重建）检查器。
 func (m *Manager) inspector(ctx context.Context, id string) (Inspector, error) {
 	m.mu.Lock()

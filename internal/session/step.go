@@ -123,6 +123,8 @@ func captionFor(step Step, el *inspect.Element) string {
 		return "执行脚本 " + quote(truncateString(args.str("script"), 70))
 	case "snapshot":
 		return "读取页面结构"
+	case "wait":
+		return "等待界面就绪"
 	case "screenshot":
 		return "截图留证"
 	case "assert":
@@ -213,7 +215,7 @@ func truncateString(s string, limit int) string {
 // 白占地方，也白花一次抓图的时间。报告里它就该只有文字。
 func HasVisual(tool string) bool {
 	switch tool {
-	case "snapshot", "eval":
+	case "snapshot", "eval", "wait":
 		return false
 	default:
 		return true

@@ -55,8 +55,8 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 	}
 
 	want := []string{
-		"assert", "click", "end_session", "eval", "fill", "list_sessions",
-		"press_key", "screenshot", "snapshot", "start_session",
+		"assert", "batch", "click", "end_session", "eval", "fill", "list_sessions",
+		"press_key", "screenshot", "snapshot", "start_session", "wait",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("工具数量 = %d，期望 %d：%v", len(got), len(want), got)
