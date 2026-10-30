@@ -308,20 +308,24 @@ func registerActionTools(server *mcp.Server, s *Server) {
 		Name:        "eval",
 		Description: "在页面里执行只读 JS 并返回结果，用于精确断言（如读 video.currentTime）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args evalArgs) (*mcp.CallToolResult, evalResult, error) {
-		var out json.RawMessage
+		var out any
 		_, _, err := s.manager.Record(ctx, args.SessionID, "eval", map[string]any{"script": args.Script},
 			func(ctx context.Context, insp session.Inspector) (string, string, error) {
 				raw, err := insp.Evaluate(ctx, args.Script)
 				if err != nil {
 					return "", "", err
 				}
-				out = raw
+				// 原样保留 JSON（对象/数组/标量），既给模型看文本也给客户端结构化值
+				if err := json.Unmarshal(raw, &out); err != nil {
+					out = string(raw)
+				}
 				return string(raw), "", nil
 			})
 		if err != nil {
 			return nil, evalResult{}, err
 		}
-		return text(string(out)), evalResult{Value: out}, nil
+		pretty, _ := json.Marshal(out)
+		return text(string(pretty)), evalResult{Value: out}, nil
 	})
 }
 
@@ -372,7 +376,9 @@ type snapshotResult struct {
 }
 
 type evalResult struct {
-	Value json.RawMessage `json:"value"`
+	// 用 any 而不是 json.RawMessage：后者会被 SDK 推成"只允许 null/array"的输出 schema，
+	// 而页面断言最常返回的是对象（{t:..., paused:...}），会被校验直接拒掉。
+	Value any `json:"value"`
 }
 
 func text(s string) *mcp.CallToolResult {

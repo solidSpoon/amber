@@ -96,6 +96,8 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}", s.getSession)
 		api.Post("/sessions/{id}/stop", s.stopSession)
 		api.Get("/sessions/{id}/events", s.listEvents)
+		api.Get("/sessions/{id}/logs", s.listLogs)
+		api.Get("/sessions/{id}/logs/{source}", s.getLog)
 		api.Post("/sessions/{id}/snapshot", s.actionSnapshot)
 		api.Post("/sessions/{id}/screenshot", s.actionScreenshot)
 		api.Post("/sessions/{id}/eval", s.actionEval)

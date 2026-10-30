@@ -72,6 +72,8 @@ type Runner interface {
 	CountRunning(ctx context.Context, labelSelector string) (int, error)
 	// Logs 取容器日志尾部。
 	Logs(ctx context.Context, name string, tail int) (string, error)
+	// Remove 删除容器（日志已归档之后再调）。
+	Remove(ctx context.Context, name string) error
 	// Stats 取容器实时资源占用（看板每台机器下面那行数字）。
 	Stats(ctx context.Context, name string) (Stats, error)
 }
@@ -157,13 +159,15 @@ func NewCLI(bin string) *CLI {
 
 // Run 用 `docker run -d` 起容器。
 //
-// 传 --rm 让容器退出后自动清理；验收会话是一次性的，不该留垃圾。
+// 刻意不用 --rm：容器退出后我们还要收集它的 stdout/stderr（应用为什么没起来就在里面），
+// 取完日志再 Remove。
 func (c *CLI) Run(ctx context.Context, spec Spec) (string, error) {
 	if spec.Name == "" || spec.Image == "" {
 		return "", errors.New("容器名与镜像不能为空")
 	}
 
-	args := []string{"run", "-d", "--rm", "--name", spec.Name}
+	// 不加 --rm：容器退出后还要 docker logs 取日志、darwin 归档，取完由 Remove 清理
+	args := []string{"run", "-d", "--name", spec.Name}
 	if spec.NetworkHost {
 		args = append(args, "--network", "host")
 	}
@@ -264,6 +268,17 @@ func (c *CLI) Logs(ctx context.Context, name string, tail int) (string, error) {
 		return out, err
 	}
 	return out, nil
+}
+
+// Remove 删除容器；容器不存在视作成功（幂等）。
+func (c *CLI) Remove(ctx context.Context, name string) error {
+	if _, err := c.run(ctx, "rm", "-f", name); err != nil {
+		if strings.Contains(err.Error(), "No such container") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // run 执行 docker 命令，把 stderr 带进错误信息（排错时不至于只剩 exit code）。

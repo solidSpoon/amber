@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,14 +207,23 @@ func (c *Client) Evaluate(ctx context.Context, expression string) (json.RawMessa
 			Value json.RawMessage `json:"value"`
 		} `json:"result"`
 		ExceptionDetails *struct {
-			Text string `json:"text"`
+			Text      string `json:"text"`
+			Exception *struct {
+				Description string `json:"description"`
+				Value       any    `json:"value"`
+			} `json:"exception"`
 		} `json:"exceptionDetails"`
 	}
 	if err := c.Call(ctx, "Runtime.evaluate", params, &out); err != nil {
 		return nil, err
 	}
 	if out.ExceptionDetails != nil {
-		return nil, fmt.Errorf("页面脚本异常: %s", out.ExceptionDetails.Text)
+		// CDP 的 text 常常只有 "Uncaught"，真正有用的信息在 exception.description 里
+		detail := out.ExceptionDetails.Text
+		if e := out.ExceptionDetails.Exception; e != nil && e.Description != "" {
+			detail = e.Description
+		}
+		return nil, fmt.Errorf("页面脚本异常: %s", strings.SplitN(detail, "\n", 4)[0])
 	}
 	return out.Result.Value, nil
 }

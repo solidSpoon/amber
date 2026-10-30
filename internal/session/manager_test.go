@@ -59,7 +59,8 @@ func (f *fakeDocker) Stats(context.Context, string) (dockerx.Stats, error) {
 	return dockerx.Stats{CPUPct: 12.5, MemUsed: 200 << 20, MemLimit: 2 << 30}, nil
 }
 
-func (f *fakeDocker) Logs(context.Context, string, int) (string, error) { return "", nil }
+func (f *fakeDocker) Logs(context.Context, string, int) (string, error) { return "app log line\n", nil }
+func (f *fakeDocker) Remove(context.Context, string) error            { return nil }
 
 // fakeInspector 模拟页面：快照固定返回两个元素，点击/输入只记录调用。
 type fakeInspector struct {

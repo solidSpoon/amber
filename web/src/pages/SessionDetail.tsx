@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, formatAgo, type Session, type SessionEvent } from '../api';
+import { api, formatAgo, type LogSource, type Session, type SessionEvent } from '../api';
 
 /**
  * 会话详情：左边录像，右边每一步操作。
@@ -70,6 +70,13 @@ export default function SessionDetail({ id }: { id: string }) {
         </p>
       )}
 
+      {session.error && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+          <div className="mb-1 text-xs font-medium text-red-500">失败原因</div>
+          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">{session.error}</pre>
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="space-y-4">
           {session.hasVideo ? (
@@ -109,7 +116,7 @@ export default function SessionDetail({ id }: { id: string }) {
           )}
         </section>
 
-        <aside className="min-w-0">
+        <aside className="min-w-0 space-y-4">
           <h2 className="mb-2 text-sm font-medium text-neutral-600">操作时间线（点一步跳一段录像）</h2>
           <ol className="space-y-1">
             {events.length === 0 && <li className="text-sm text-neutral-400">还没有工具调用。</li>}
@@ -134,8 +141,123 @@ export default function SessionDetail({ id }: { id: string }) {
               </li>
             ))}
           </ol>
+
+          <LogPanel sessionId={session.id} />
         </aside>
       </div>
     </div>
   );
+}
+
+
+/**
+ * 日志面板：容器输出（应用为什么没起来通常只在这里）与应用自身日志切换查看。
+ *
+ * 容器是一次性的，调度器会在删除容器前把 stdout/stderr 归档进会话目录，
+ * 所以这里读的是归档文件，不是 docker logs。
+ */
+function LogPanel({ sessionId }: { sessionId: string }) {
+  const [sources, setSources] = useState<LogSource[]>([]);
+  const [active, setActive] = useState('container');
+  const [text, setText] = useState('');
+
+  useEffect(() => {
+    fetch(`/api/sessions/${sessionId}/logs`)
+      .then((resp) => (resp.ok ? resp.json() : { sources: [] }))
+      .then((data: { sources: LogSource[] }) => {
+        setSources(data.sources ?? []);
+        if (data.sources?.length && !data.sources.some((s) => s.name === active)) {
+          setActive(data.sources[0].name);
+        }
+      })
+      .catch(() => setSources([]));
+    // active 变化时需要重新取，故依赖里带上它
+  }, [sessionId, active]);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/sessions/${sessionId}/logs/${active}?tail=200`)
+      .then((resp) => (resp.ok ? resp.text() : ''))
+      .then((body) => {
+        if (alive) setText(body);
+      })
+      .catch(() => setText(''));
+    return () => {
+      alive = false;
+    };
+  }, [sessionId, active, sources.length]);
+
+  if (sources.length === 0) {
+    return <p className="text-xs text-neutral-400">暂无日志</p>;
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-1">
+        {sources.map((source) => (
+          <button
+            key={source.name}
+            onClick={() => setActive(source.name)}
+            className={`rounded-md px-2 py-1 text-xs transition ${
+              active === source.name
+                ? 'bg-neutral-900 text-white'
+                : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+            }`}
+          >
+            {source.label}
+          </button>
+        ))}
+        <a
+          href={`/api/sessions/${sessionId}/logs/${active}`}
+          target="_blank"
+          rel="noreferrer"
+          className="ml-auto text-xs text-sky-600 hover:underline"
+        >
+          全文 ↗
+        </a>
+      </div>
+      <pre className="max-h-72 overflow-auto rounded-lg bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-200">
+        {formatLog(text) || '（空）'}
+      </pre>
+    </div>
+  );
+}
+
+
+/**
+ * 把日志压成一眼能扫的形态。
+ *
+ * DashPlayer 的应用日志是 JSONL，原样贴出来满屏都是 {"schemaVersion":1,…}；
+ * 这里把每行折成「时间 级别 [模块] 消息」，解析失败的行原样保留（不能丢信息）。
+ */
+function formatLog(raw: string): string {
+  return raw
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) return trimmed;
+      try {
+        const entry = JSON.parse(trimmed) as Record<string, unknown>;
+        const time = typeof entry.time === 'string' ? entry.time.slice(11, 19) : '';
+        const level = String(entry.level ?? '').toUpperCase().padEnd(5);
+        const module = entry.module ?? entry.name ?? entry.scope ?? '';
+        const msg = entry.message ?? entry.msg ?? '';
+        const rest = { ...entry };
+        delete rest.schemaVersion;
+        delete rest.appVersion;
+        delete rest.runId;
+        delete rest.time;
+        delete rest.level;
+        delete rest.message;
+        delete rest.msg;
+        delete rest.module;
+        delete rest.name;
+        delete rest.scope;
+        const extra = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : '';
+        return `${time} ${level} ${module ? `[${module}] ` : ''}${msg}${extra}`;
+      } catch {
+        return trimmed;
+      }
+    })
+    .join('\n');
 }

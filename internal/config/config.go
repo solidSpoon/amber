@@ -24,6 +24,9 @@ type Config struct {
 	DataDir string
 	// Image 起会话用的容器镜像。
 	Image string
+	// ModelsDir 预置模型目录（宿主机），只读挂到容器 /assets/models。
+	// 需要离线推理的应用（如 DashPlayer 的本地翻译）靠它避免会话内下载。
+	ModelsDir string
 	// MediaDir 验收素材目录（宿主机），只读挂到容器 /assets。
 	// 需要媒体素材的应用（如播放器）必须配置它，否则起会话时直接报错。
 	MediaDir string
@@ -72,6 +75,7 @@ func Load() (*Config, error) {
 		Image:          env("RIGD_IMAGE", "electron-acceptance-rig:latest"),
 		DockerBin:      env("RIGD_DOCKER", "docker"),
 		MediaDir:       env("RIGD_MEDIA_DIR", ""),
+		ModelsDir:      env("RIGD_MODELS_DIR", ""),
 		MaxSessions:    envInt("RIGD_MAX_SESSIONS", 2),
 		IdleTimeout:    envDuration("RIGD_IDLE_TIMEOUT", 10*time.Minute),
 		MaxLifetime:    envDuration("RIGD_MAX_LIFETIME", 40*time.Minute),

@@ -22,6 +22,12 @@ export interface Session {
   error?: string;
 }
 
+export interface LogSource {
+  name: string;
+  label: string;
+  bytes: number;
+}
+
 export interface SessionEvent {
   seq: number;
   at: string;

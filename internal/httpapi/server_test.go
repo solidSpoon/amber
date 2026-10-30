@@ -37,7 +37,8 @@ func (fakeDocker) Exec(context.Context, string, ...string) (string, error) {
 	return `{"startedAtMs":1700000000000}`, nil
 }
 func (fakeDocker) CountRunning(context.Context, string) (int, error) { return 1, nil }
-func (fakeDocker) Logs(context.Context, string, int) (string, error) { return "", nil }
+func (fakeDocker) Logs(context.Context, string, int) (string, error) { return "app log line\n", nil }
+func (fakeDocker) Remove(context.Context, string) error            { return nil }
 func (fakeDocker) Stats(context.Context, string) (dockerx.Stats, error) {
 	return dockerx.Stats{CPUPct: 12.5, MemUsed: 200 << 20, MemLimit: 2 << 30}, nil
 }

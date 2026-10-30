@@ -216,7 +216,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 			"RIG_APP_DIR":    appSpec.AppDir,
 			"RIG_GIT_REF":    sess.Ref,
 		},
-		Mounts: mountsFor(appSpec, sess.Dir, m.cfg.MediaDir),
+		Mounts: mountsFor(appSpec, sess.Dir, m.cfg.MediaDir, m.cfg.ModelsDir),
 	}
 
 	if appSpec.YarnCacheVolume != "" {
@@ -257,9 +257,12 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 	if readyErr != nil {
 		// 容器里为什么没起来，答案只在它的日志里：抓下来写进会话目录，别让它随 --rm 消失
 		detail := fmt.Sprintf("等待应用就绪失败: %v", readyErr)
-		if logs, err := m.docker.Logs(ctx, containerName, 120); err == nil && strings.TrimSpace(logs) != "" {
-			_ = os.WriteFile(filepath.Join(sess.Dir, "logs", "container.log"), []byte(logs), 0o644)
-			detail = fmt.Sprintf("%s\n容器日志尾部：\n%s", detail, tailLines(logs, 15))
+		if path, err := m.archiveContainerLogs(ctx, containerName, sess.Dir); err == nil && path != "" {
+			detail = fmt.Sprintf("%s\n容器日志：logs/container.log", detail)
+		}
+		// 容器已经不可能再用了，取完日志就删，别留垃圾
+		if err := m.docker.Remove(ctx, containerName); err != nil {
+			m.log.Warn("删除失败容器时出错", "session", id, "err", err)
 		}
 		sess.Status = store.StatusFailed
 		sess.Error = detail
@@ -330,8 +333,18 @@ func (m *Manager) Stop(ctx context.Context, id, verdict, summary string) (store.
 	sess.Status = store.StatusStopping
 	_ = m.store.UpdateSession(ctx, sess)
 
-	if err := m.docker.Stop(ctx, "rigd-"+id, 25*time.Second); err != nil && !errors.Is(err, dockerx.ErrContainerNotFound) {
+	containerName := "rigd-" + id
+	if err := m.docker.Stop(ctx, containerName, 25*time.Second); err != nil && !errors.Is(err, dockerx.ErrContainerNotFound) {
 		m.log.Warn("停止容器失败", "session", id, "err", err)
+	}
+	// 容器退出后才有完整日志：先归档，再删除
+	if path, err := m.archiveContainerLogs(ctx, containerName, sess.Dir); err != nil {
+		m.log.Warn("归档容器日志失败", "session", id, "err", err)
+	} else if path != "" {
+		m.log.Info("容器日志已归档", "session", id, "path", path)
+	}
+	if err := m.docker.Remove(ctx, containerName); err != nil {
+		m.log.Warn("删除容器失败", "session", id, "err", err)
 	}
 	if live.inspector != nil {
 		_ = live.inspector.Close()
@@ -436,6 +449,16 @@ func (m *Manager) Record(ctx context.Context, id, tool string, args any, fn func
 
 	started := time.Now()
 	result, artifact, callErr := fn(ctx, insp)
+	// CDP 连接会因为应用重载、DevTools 断开而失效；这时重连一次再试，
+	// 而不是让这个会话之后所有操作都报 "use of closed network connection"。
+	if callErr != nil && isTransportError(callErr) {
+		m.log.Warn("检查器连接已失效，重连后重试", "session", id, "err", callErr)
+		m.dropInspector(id)
+		if fresh, err := m.inspector(ctx, id); err == nil {
+			insp = fresh
+			result, artifact, callErr = fn(ctx, insp)
+		}
+	}
 	duration := time.Since(started)
 
 	m.mu.Lock()
@@ -492,6 +515,19 @@ func (m *Manager) Sweep(ctx context.Context) []string {
 		}
 	}
 	m.mu.Unlock()
+
+	// 顺便巡检容器是否还活着（外部 docker rm / OOM 不会通知我们）
+	m.mu.Lock()
+	aliveCheck := make([]string, 0, len(m.live))
+	for id, live := range m.live {
+		if live.session.Status == store.StatusReady {
+			aliveCheck = append(aliveCheck, id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range aliveCheck {
+		m.checkContainerAlive(ctx, id)
+	}
 
 	reclaimed := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -626,10 +662,15 @@ func tailLines(text string, n int) string {
 
 // mountsFor 组装挂载：/out 必须有；依赖缓存卷只有应用声明了才挂
 // （内置示例应用不需要，挂空卷名会直接让 docker 报错）。
-func mountsFor(spec AppSpec, sessionDir, mediaDir string) []dockerx.Mount {
+func mountsFor(spec AppSpec, sessionDir, mediaDir, modelsDir string) []dockerx.Mount {
 	mounts := []dockerx.Mount{{Source: sessionDir, ContainerPath: "/out"}}
 	if mediaDir != "" {
 		mounts = append(mounts, dockerx.Mount{Source: mediaDir, ContainerPath: "/assets", ReadOnly: true})
+	}
+	if modelsDir != "" {
+		// 必须是顶层路径：把只读目录嵌在另一个只读挂载里面，runc 无法在只读的
+		// /assets 里创建 /assets/models 这个挂载点（Read-only file system）。
+		mounts = append(mounts, dockerx.Mount{Source: modelsDir, ContainerPath: "/models", ReadOnly: true})
 	}
 	add := func(volume, target string) {
 		if volume == "" {
@@ -815,4 +856,74 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		m.log.Info("已接管仍在运行的会话", "count", recovered)
 	}
 	return recovered, nil
+}
+
+// isTransportError 判断错误是不是"连接层挂了"，而不是页面里的业务错误。
+func isTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		"use of closed network connection", "connection reset", "broken pipe",
+		"EOF", "CDP 连接已关闭", "i/o timeout", "connection refused",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropInspector 丢掉缓存的检查器，下次使用时重新建连。
+func (m *Manager) dropInspector(id string) {
+	m.mu.Lock()
+	live, ok := m.live[id]
+	if ok {
+		live.inspector = nil
+	}
+	m.mu.Unlock()
+	if ok && live != nil && live.inspector == nil {
+		m.log.Info("已清除失效的检查器连接", "session", id)
+	}
+}
+
+// checkContainerAlive 巡检：容器没了就把会话收尾，避免"显示 ready 但点不动"。
+func (m *Manager) checkContainerAlive(ctx context.Context, id string) {
+	state, err := m.docker.Inspect(ctx, "rigd-"+id)
+	if err == nil && state.Running {
+		return
+	}
+	m.log.Warn("容器已不在运行，自动收尾会话", "session", id)
+	if _, err := m.Stop(ctx, id, "", "容器意外退出，已自动收尾"); err != nil {
+		m.log.Error("自动收尾失败", "session", id, "err", err)
+	}
+	sess, getErr := m.store.GetSession(ctx, id)
+	if getErr == nil {
+		sess.Status = store.StatusFailed
+		sess.Error = "运行期间容器意外退出"
+		_ = m.store.UpdateSession(ctx, sess)
+	}
+}
+
+// archiveContainerLogs 把容器 stdout/stderr 落到会话目录，返回文件路径。
+//
+// 应用为什么没起来、为什么白屏，答案通常只在这里；容器用的是 --rm 之外的策略，
+// 所以必须在删除容器之前做这一步。
+func (m *Manager) archiveContainerLogs(ctx context.Context, container, sessionDir string) (string, error) {
+	logs, err := m.docker.Logs(ctx, container, 4000)
+	if err != nil && strings.TrimSpace(logs) == "" {
+		return "", err
+	}
+	if strings.TrimSpace(logs) == "" {
+		return "", nil
+	}
+	path := filepath.Join(sessionDir, "logs", "container.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(logs), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
