@@ -205,7 +205,7 @@ func (c *Client) Evaluate(ctx context.Context, script string) (json.RawMessage, 
 // PreviewJPEG 只取一帧 JPEG（不落盘），给看板的实时预览用。
 func (c *Client) PreviewJPEG(ctx context.Context, quality int) ([]byte, error) {
 	// 看板上的缩略屏最大 960 宽就够了，再大既看不清也用不上
-	data, err := c.cdp.ScreenshotJPEGScaled(ctx, quality, 960)
+	data, err := c.cdp.ScreenshotJPEG(ctx, quality)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +270,7 @@ func (c *Client) StepJPEG(ctx context.Context, path, ref string) (int64, error) 
 		}
 	}
 
-	data, err := c.cdp.ScreenshotJPEGScaled(ctx, 85, 960)
+	data, err := c.cdp.ScreenshotJPEG(ctx, 85)
 	if err != nil {
 		return 0, err
 	}

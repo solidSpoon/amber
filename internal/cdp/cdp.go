@@ -29,12 +29,12 @@ type Target struct {
 
 // Client 绑定到某一个 page target 的连接。
 type Client struct {
-	conn   *websocket.Conn
-	mu     sync.Mutex
-	nextID int64
+	conn    *websocket.Conn
+	mu      sync.Mutex
+	nextID  int64
 	pending map[int64]chan rawResponse
-	closed chan struct{}
-	once   sync.Once
+	closed  chan struct{}
+	once    sync.Once
 }
 
 type rawResponse struct {
@@ -225,8 +225,8 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 // Evaluate 在页面里执行表达式，返回 result.value 的原始 JSON。
 func (c *Client) Evaluate(ctx context.Context, expression string) (json.RawMessage, error) {
 	params := map[string]any{
-		"expression":   expression,
-		"awaitPromise": true,
+		"expression":    expression,
+		"awaitPromise":  true,
 		"returnByValue": true,
 	}
 	var out struct {
@@ -260,39 +260,21 @@ func (c *Client) Screenshot(ctx context.Context) (string, error) {
 	return c.capture(ctx, "png", 0)
 }
 
-// ScreenshotJPEG 截 JPEG（看板实时预览用：同样画面体积只有 PNG 的 1/5）。
+// ScreenshotJPEG 截 JPEG（看板预览与步骤图用：同样画面体积只有 PNG 的 1/5）。
+//
+// 一律按窗口原始尺寸截，不带 clip/scale：带缩放抓图时，软件合成（没有 GPU）会把
+// 缩放应用到真实画面上，那一瞬间屏幕上显示的是"整个页面缩到左上角"，录屏抓进去
+// 就是每隔一两个正常帧插一张半尺寸的坏帧——片段一循环播放，看着就是一直在闪。
 //
 // quality 取 1~100，0 表示用 CDP 默认值。
 func (c *Client) ScreenshotJPEG(ctx context.Context, quality int) (string, error) {
 	return c.capture(ctx, "jpeg", quality)
 }
 
-// ScreenshotJPEGScaled 截 JPEG 并按 maxWidth 等比缩放（预览用）。
-func (c *Client) ScreenshotJPEGScaled(ctx context.Context, quality, maxWidth int) (string, error) {
-	return c.captureScaled(ctx, "jpeg", quality, maxWidth)
-}
-
 func (c *Client) capture(ctx context.Context, format string, quality int) (string, error) {
-	return c.captureScaled(ctx, format, quality, 0)
-}
-
-// captureScaled 按目标宽度等比缩放截图；maxWidth<=0 表示原始尺寸。
-//
-// 用 CDP 的 clip.scale 而不是截完再缩：1920 宽的画面在 2fps 推流下体积很可观，
-// 让内核直接按缩放渲染比"传完再压缩"省一大截带宽和 CPU。
-func (c *Client) captureScaled(ctx context.Context, format string, quality, maxWidth int) (string, error) {
 	params := map[string]any{"format": format}
 	if quality > 0 {
 		params["quality"] = quality
-	}
-	if maxWidth > 0 {
-		if width, height := c.viewport(ctx); width > 0 && width > float64(maxWidth) {
-			scale := float64(maxWidth) / width
-			params["clip"] = map[string]any{
-				"x": 0, "y": 0, "width": width, "height": height,
-				"scale": scale,
-			}
-		}
 	}
 	var out struct {
 		Data string `json:"data"`
