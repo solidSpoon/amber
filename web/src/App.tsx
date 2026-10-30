@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ListChecksIcon, MonitorPlayIcon, PlugIcon } from 'lucide-react';
+import { BookOpenIcon, ListChecksIcon, MonitorPlayIcon, PlugIcon } from 'lucide-react';
 import { buttonVariants } from '@/components/ui/button';
 import { Toaster } from '@/components/ui/sonner';
 import { cn } from '@/lib/utils';
 import Dashboard from './pages/Dashboard';
 import Mcp from './pages/Mcp';
+import ProductDoc from './pages/ProductDoc';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
 
@@ -14,13 +15,15 @@ type Route =
   | { name: 'dashboard' }
   | { name: 'sessions' }
   | { name: 'session'; id: string }
-  | { name: 'mcp' };
+  | { name: 'mcp' }
+  | { name: 'docs' };
 
 function parseRoute(hash: string): Route {
   const clean = hash.replace(/^#\/?/, '');
   if (clean.startsWith('sessions/')) return { name: 'session', id: clean.slice('sessions/'.length) };
   if (clean === 'sessions') return { name: 'sessions' };
   if (clean === 'mcp') return { name: 'mcp' };
+  if (clean === 'docs') return { name: 'docs' };
   return { name: 'dashboard' };
 }
 
@@ -28,6 +31,8 @@ const NAV = [
   { href: '#/', label: '看板', key: 'dashboard', icon: MonitorPlayIcon },
   { href: '#/sessions', label: '验收会话', key: 'sessions', icon: ListChecksIcon },
   { href: '#/mcp', label: 'MCP 接入', key: 'mcp', icon: PlugIcon },
+  // 产品文档排在最后：它是"依据"，不是日常操作入口
+  { href: '#/docs', label: '产品文档', key: 'docs', icon: BookOpenIcon },
 ] as const;
 
 export default function App() {
@@ -83,6 +88,7 @@ export default function App() {
         {route.name === 'sessions' && <Sessions />}
         {route.name === 'session' && <SessionDetail id={route.id} />}
         {route.name === 'mcp' && <Mcp />}
+        {route.name === 'docs' && <ProductDoc />}
       </main>
 
       <Toaster position="bottom-right" />

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/solidSpoon/rigd/docs"
 
 	"github.com/solidSpoon/rigd/internal/config"
 	"github.com/solidSpoon/rigd/internal/mcpserver"
@@ -119,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 		api.Put("/blobs/{digest}", s.putBlob)
 		api.Post("/manifests", s.putManifest)
 		api.Get("/mcp", s.mcpInfo)
+		api.Get("/docs/product", s.productDoc)
 		api.Get("/system/metrics", s.systemMetrics)
 		api.Get("/system/stream", s.streamSystem)
 	})
@@ -372,6 +375,12 @@ func (s *Server) serveVideo(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveClip 某一步前后 4 秒的短片（懒切片，切过就缓存）。
+// productDoc 返回产品文档原文：页面按 Markdown 渲染，文档本身只有一份（docs/PRODUCT.md）。
+func (s *Server) productDoc(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	_, _ = io.WriteString(w, docs.Product)
+}
+
 func (s *Server) serveClip(w http.ResponseWriter, r *http.Request) {
 	seq, err := strconv.Atoi(chi.URLParam(r, "seq"))
 	if err != nil {
