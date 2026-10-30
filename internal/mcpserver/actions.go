@@ -249,7 +249,7 @@ const (
 // 故意做成扁平结构而不是嵌套 JSON：模型写错一层就整个批跑不了，
 // 扁平至少能一眼看出哪一项写错了。
 type batchStep struct {
-	Action string `json:"action" jsonschema:"动作：snapshot/click/fill/press_key/eval/wait/screenshot/assert"`
+	Action string `json:"action" jsonschema:"动作：snapshot/click/fill/press_key/eval/wait/screenshot/assert/desktop"`
 	stepArgs
 
 	Ref       string  `json:"ref,omitempty"`
@@ -267,6 +267,8 @@ type batchStep struct {
 	Claim     string  `json:"claim,omitempty"`
 	OK        *bool   `json:"ok,omitempty"`
 	Evidence  string  `json:"evidence,omitempty"`
+	Op        string  `json:"op,omitempty"`
+	Value     string  `json:"value,omitempty"`
 }
 
 // stepExtra 是某些动作额外要交给模型的东西（元素表、求值结果、要展示的原文）。
@@ -312,6 +314,35 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 			return "", stepExtra{}, err
 		}
 		return fmt.Sprintf("已截图：%s（%d 字节）", st.Label, size), stepExtra{Value: path}, nil
+	case "desktop":
+		// 原生对话框、系统菜单这类 CDP 够不到的地方
+		if st.Op == "" || st.Value == "" {
+			return "", stepExtra{}, errors.New("desktop 需要 op（key/type）和 value")
+		}
+		caption := "按下 " + st.Value
+		if st.Op == "type" {
+			caption = "输入「" + st.Value + "」"
+		}
+		msg, _, err := s.manager.Record(ctx, sid, session.Step{
+			Tool: "desktop", Args: map[string]any{"op": st.Op, "value": st.Value},
+			Intent: base.Intent, Expect: base.Expect, Caption: caption,
+		}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
+			switch st.Op {
+			case "key":
+				if err := s.manager.DesktopKey(ctx, sid, st.Value); err != nil {
+					return "", "", err
+				}
+				return "已按下 " + st.Value, "", nil
+			case "type":
+				if err := s.manager.DesktopType(ctx, sid, st.Value); err != nil {
+					return "", "", err
+				}
+				return "已输入 " + st.Value, "", nil
+			default:
+				return "", "", fmt.Errorf("desktop 的 op 只支持 key / type（收到 %q）", st.Op)
+			}
+		})
+		return msg, stepExtra{}, err
 	case "assert":
 		if st.OK == nil {
 			return "", stepExtra{}, errors.New("assert 必须给 ok")

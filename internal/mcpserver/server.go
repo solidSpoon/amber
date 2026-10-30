@@ -195,7 +195,8 @@ func registerRunTool(server *mcp.Server, s *Server) {
 		Name: "run",
 		Description: "按顺序执行一串动作（steps 数组，1~50 步），中间不回到你这边；只做一件事就传一个只含一个元素的数组。" +
 			"动作：snapshot 读页面结构 / click 点元素（ref 或 match 文字或 selector）/ fill 填文本 / " +
-			"press_key 按键 / eval 在页面求值 / wait 等条件成立 / screenshot 截图留证 / assert 记一条断言。" +
+			"press_key 按键 / eval 在页面求值 / wait 等条件成立 / screenshot 截图留证 / assert 记一条断言 / " +
+			"desktop 系统级键盘输入（op=key|type，用于原生文件对话框这类页面外的地方）。" +
 			"时效性靠它保证：拖动到 6 秒后立刻截图，两步之间不会隔着你思考的那几十秒。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
 			"每一步都会在验收报告里各记一条，当作独立的一步来读。",
