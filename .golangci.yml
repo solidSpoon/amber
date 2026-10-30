@@ -1,0 +1,31 @@
+# 只开对「长期可维护」真正有用的 linter，避免一堆风格噪音淹没真问题。
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+    - misspell
+    - revive
+    - unconvert
+    - wastedassign
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+  errcheck:
+    check-type-assertions: true
+
+issues:
+  exclude-rules:
+    # 测试里允许忽略清理类错误
+    - path: _test\.go
+      linters: [errcheck]
