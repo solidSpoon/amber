@@ -40,8 +40,10 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex min-h-full bg-background text-foreground">
-      <aside className="flex w-60 shrink-0 flex-col gap-6 border-r bg-sidebar p-4">
+    // 外壳固定一屏高、内部各自滚动：滚动正文时侧边栏必须钉住，
+    // 否则导航会跟着列表一起走远（长列表下尤其难受）
+    <div className="flex h-svh overflow-hidden bg-background text-foreground">
+      <aside className="flex h-full w-60 shrink-0 flex-col gap-6 overflow-y-auto border-r bg-sidebar p-4">
         <div className="flex flex-col gap-0.5 px-2 pt-1">
           <span className="text-base font-semibold tracking-tight">rigd</span>
           <span className="text-xs text-muted-foreground">一次性 GUI 验收控制台</span>
@@ -70,7 +72,7 @@ export default function App() {
         </nav>
       </aside>
 
-      <main className="min-w-0 flex-1 p-6 lg:p-8">
+      <main className="min-w-0 flex-1 overflow-y-auto p-6 lg:p-8">
         {route.name === 'dashboard' && <Dashboard />}
         {route.name === 'sessions' && <Sessions />}
         {route.name === 'session' && <SessionDetail id={route.id} />}
