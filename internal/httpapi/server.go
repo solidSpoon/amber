@@ -65,6 +65,12 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}", s.getSession)
 		api.Post("/sessions/{id}/stop", s.stopSession)
 		api.Get("/sessions/{id}/events", s.listEvents)
+		api.Post("/sessions/{id}/snapshot", s.actionSnapshot)
+		api.Post("/sessions/{id}/screenshot", s.actionScreenshot)
+		api.Post("/sessions/{id}/eval", s.actionEval)
+		api.Post("/sessions/{id}/click", s.actionClick)
+		api.Post("/sessions/{id}/fill", s.actionFill)
+		api.Post("/sessions/{id}/press", s.actionPress)
 		api.Get("/sessions/{id}/video", s.serveVideo)
 		api.Get("/sessions/{id}/artifacts/{name}", s.serveArtifact)
 		api.Get("/sessions/stream", s.streamSessions)
@@ -159,16 +165,28 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		req.Ref = "main"
 	}
 
-	sess, err := s.manager.Start(r.Context(), session.Options{App: req.App, Ref: req.Ref})
+	// 起会话要 clone + 装依赖 + 构建 + 启动应用，动辄几分钟：
+	// 这里只做同步登记并立刻返回 202，真正的启动在后台跑，进度通过 SSE 推给前端。
+	sess, err := s.manager.Prepare(r.Context(), session.Options{App: req.App, Ref: req.Ref})
 	if errors.Is(err, session.ErrTooManySessions) {
 		writeError(w, http.StatusTooManyRequests, err)
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toSessionDTO(sess))
+
+	go func() {
+		// 用独立 context：创建请求结束（客户端断开）不应该中断已经开始的启动流程
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if _, err := s.manager.Provision(ctx, sess); err != nil {
+			s.log.Error("会话启动失败", "session", sess.ID, "err", err)
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, toSessionDTO(sess))
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {

@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,14 +95,38 @@ func NewManager(cfg *config.Config, st *store.Store, docker dockerx.Runner, fact
 // ErrTooManySessions 并发会话已满。直接拒绝而不是排队：验收是有时限的人工任务，排队只会让人以为卡住了。
 var ErrTooManySessions = errors.New("并发会话已达上限")
 
-// Start 创建会话：分配端口 → 起容器 → 等应用就绪 → 读录像起点 → 置为 ready。
+// Start 同步完成准备与启动，返回就绪（或失败）的会话。
+//
+// MCP 场景适合用它：工具调用本来就是「等待结果」的语义。
+// HTTP 场景用 Prepare + Provision，避免一个请求挂几分钟。
 func (m *Manager) Start(ctx context.Context, opts Options) (store.Session, error) {
+	sess, err := m.Prepare(ctx, opts)
+	if err != nil {
+		return store.Session{}, err
+	}
+	return m.Provision(ctx, sess)
+}
+
+// Prepare 只做同步的登记工作：校验应用、占端口、建目录、写库（status=starting）。
+//
+// 拆出来是为了让 HTTP 能立刻返回会话 ID——构建镜像/启动应用要几分钟，
+// 让请求挂在那儿既过不了网关超时，也没法提前把进度推给前端。
+func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, error) {
 	m.mu.Lock()
 	if len(m.live) >= m.cfg.MaxSessions {
 		m.mu.Unlock()
 		return store.Session{}, ErrTooManySessions
 	}
 	m.mu.Unlock()
+
+	spec, err := LookupApp(opts.App)
+	if err != nil {
+		return store.Session{}, err
+	}
+	// 素材缺失要在起容器之前就失败，别等到构建脚本 cp 才报 ENOENT
+	if spec.RequiresMedia && m.cfg.MediaDir == "" {
+		return store.Session{}, fmt.Errorf("应用 %s 需要验收素材，但未配置 RIGD_MEDIA_DIR", opts.App)
+	}
 
 	id := newID()
 	dir := filepath.Join(m.cfg.SessionsDir(), id)
@@ -122,7 +147,7 @@ func (m *Manager) Start(ctx context.Context, opts Options) (store.Session, error
 
 	sess := store.Session{
 		ID:        id,
-		App:       opts.App,
+		App:       opts.App, // 存注册表 key（稳定标识）；展示名用 appSpec.Name
 		Ref:       opts.Ref,
 		Image:     m.cfg.Image,
 		Status:    store.StatusStarting,
@@ -135,7 +160,22 @@ func (m *Manager) Start(ctx context.Context, opts Options) (store.Session, error
 		return store.Session{}, err
 	}
 
+	return sess, nil
+}
+
+// Provision 起容器并等应用就绪：docker run → 等 CDP → 读录像起点 → 置 ready。
+//
+// 就绪失败会把会话标记 failed 并停掉容器，绝不留下「容器活着但连不上」的空壳。
+func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Session, error) {
+	id := sess.ID
 	containerName := "rigd-" + id
+	cdpPort := sess.CDPPort
+	vncPort := sess.VNCPort
+	appSpec, err := LookupApp(sess.App)
+	if err != nil {
+		return sess, err
+	}
+
 	spec := dockerx.Spec{
 		Name:        containerName,
 		Image:       m.cfg.Image,
@@ -150,10 +190,31 @@ func (m *Manager) Start(ctx context.Context, opts Options) (store.Session, error
 			"RIG_FPS":        fmt.Sprint(m.cfg.Record.FPS),
 			"RIG_DEBUG_PORT": fmt.Sprint(cdpPort),
 			"RIG_VNC_PORT":   fmt.Sprint(vncPort),
-			"RIG_APP_NAME":   opts.App,
-			"RIG_GIT_REF":    opts.Ref,
+			"RIG_APP_NAME":   appSpec.Name,
+			"RIG_APP_DIR":    appSpec.AppDir,
+			"RIG_GIT_REF":    sess.Ref,
 		},
-		Mounts: []dockerx.Mount{{HostPath: dir, ContainerPath: "/out"}},
+		Mounts: mountsFor(appSpec, sess.Dir, m.cfg.MediaDir),
+	}
+
+	if appSpec.YarnCacheVolume != "" {
+		spec.Env["YARN_CACHE_FOLDER"] = "/cache/yarn"
+	}
+	if appSpec.ElectronCacheVolume != "" {
+		spec.Env["RIG_ELECTRON_CACHE"] = "/opt/electron-cache"
+	}
+	if appSpec.Repo != "" && sess.Ref != "" {
+		spec.Env["RIG_GIT_URL"] = appSpec.Repo
+	}
+	if appSpec.BuildScript != "" {
+		spec.Env["RIG_BUILD_SCRIPT"] = appSpec.BuildScript
+	}
+	if appSpec.Bootstrap != "" {
+		spec.Env["RIG_BOOTSTRAP"] = appSpec.Bootstrap
+	}
+	if appSpec.Repo == "" {
+		// 镜像内置应用：容器侧不需要取源码
+		spec.Env["RIG_SOURCE_MODE"] = "bundled"
 	}
 
 	containerID, err := m.docker.Run(ctx, spec)
@@ -172,8 +233,14 @@ func (m *Manager) Start(ctx context.Context, opts Options) (store.Session, error
 	// 必须等真连上才置 ready，否则调用方会对着一个空壳发工具调用。
 	inspector, readyErr := m.factory(ctx, cdpPort)
 	if readyErr != nil {
+		// 容器里为什么没起来，答案只在它的日志里：抓下来写进会话目录，别让它随 --rm 消失
+		detail := fmt.Sprintf("等待应用就绪失败: %v", readyErr)
+		if logs, err := m.docker.Logs(ctx, containerName, 120); err == nil && strings.TrimSpace(logs) != "" {
+			_ = os.WriteFile(filepath.Join(sess.Dir, "logs", "container.log"), []byte(logs), 0o644)
+			detail = fmt.Sprintf("%s\n容器日志尾部：\n%s", detail, tailLines(logs, 15))
+		}
 		sess.Status = store.StatusFailed
-		sess.Error = fmt.Sprintf("等待应用就绪失败: %v", readyErr)
+		sess.Error = detail
 		sess.EndedAt = time.Now()
 		_ = m.store.UpdateSession(ctx, sess)
 		if err := m.docker.Stop(ctx, containerName, 10*time.Second); err != nil {
@@ -200,6 +267,18 @@ func (m *Manager) Start(ctx context.Context, opts Options) (store.Session, error
 		live.recordingStartMs = ms
 	} else {
 		m.log.Warn("读取录像起点失败，操作偏移量将退化", "session", id, "err", err)
+	}
+
+	// 记录验的到底是哪个 commit：容器取码时写了 source.json，读不回来就留空，
+	// 但绝不能拿「分支名」冒充 sha——报告里那行必须可信。
+	if commit, err := m.readCommitSHA(ctx, containerName); err == nil && commit != "" {
+		sess.CommitSHA = commit
+		_ = m.store.UpdateSession(ctx, sess)
+		m.mu.Lock()
+		live.session.CommitSHA = commit
+		m.mu.Unlock()
+	} else if err != nil {
+		m.log.Warn("读取 commit 失败", "session", id, "err", err)
 	}
 
 	m.log.Info("会话就绪", "session", id, "cdp", cdpPort, "vnc", vncPort, "container", containerName)
@@ -447,6 +526,21 @@ func (m *Manager) readRecordingStart(ctx context.Context, container string) (int
 	return meta.StartedAtMs, nil
 }
 
+// readCommitSHA 从容器里读源码元信息（rig-fetch-source 写的 source.json）。
+func (m *Manager) readCommitSHA(ctx context.Context, container string) (string, error) {
+	out, err := m.docker.Exec(ctx, container, "cat", "/out/logs/source.json")
+	if err != nil {
+		return "", err
+	}
+	var meta struct {
+		Commit string `json:"commit"`
+	}
+	if err := json.Unmarshal([]byte(out), &meta); err != nil {
+		return "", fmt.Errorf("解析 source.json 失败: %w", err)
+	}
+	return meta.Commit, nil
+}
+
 type videoMeta struct {
 	DurationMS int64 `json:"durationMs"`
 	Duration   float64 `json:"duration"`
@@ -498,3 +592,31 @@ func truncate(s string, limit int) string {
 
 // 让 cdp 包的类型在文档层面可见（inspect 依赖它），避免 import 被误删。
 var _ = cdp.Target{}
+
+// tailLines 取文本最后 n 行，用于把容器日志尾部塞进错误信息。
+func tailLines(text string, n int) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) <= n {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// mountsFor 组装挂载：/out 必须有；依赖缓存卷只有应用声明了才挂
+// （内置示例应用不需要，挂空卷名会直接让 docker 报错）。
+func mountsFor(spec AppSpec, sessionDir, mediaDir string) []dockerx.Mount {
+	mounts := []dockerx.Mount{{Source: sessionDir, ContainerPath: "/out"}}
+	if mediaDir != "" {
+		mounts = append(mounts, dockerx.Mount{Source: mediaDir, ContainerPath: "/assets", ReadOnly: true})
+	}
+	add := func(volume, target string) {
+		if volume == "" {
+			return
+		}
+		mounts = append(mounts, dockerx.Mount{Source: volume, ContainerPath: target})
+	}
+	add(spec.NodeModulesVolume, filepath.Join(spec.AppDir, "node_modules"))
+	add(spec.YarnCacheVolume, "/cache/yarn")
+	add(spec.ElectronCacheVolume, "/opt/electron-cache")
+	return mounts
+}

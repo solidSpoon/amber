@@ -54,7 +54,8 @@ type Factory func(ctx context.Context, port int) (*Client, error)
 
 // Dial 连到一个已经就绪的调试端口。
 func Dial(ctx context.Context, port int) (*Client, error) {
-	conn, err := cdp.DialPage(ctx, port, 90*time.Second)
+	// 冷启动要 clone + 装依赖 + 构建 + 启动，5 分钟是实测最坏情况的上限
+	conn, err := cdp.DialPage(ctx, port, 5*time.Minute)
 	if err != nil {
 		return nil, err
 	}

@@ -22,6 +22,9 @@ type Config struct {
 	DataDir string
 	// Image 起会话用的容器镜像。
 	Image string
+	// MediaDir 验收素材目录（宿主机），只读挂到容器 /assets。
+	// 需要媒体素材的应用（如播放器）必须配置它，否则起会话时直接报错。
+	MediaDir string
 	// DockerBin docker 可执行文件路径，便于测试替换。
 	DockerBin string
 	// MaxSessions 同时允许运行的会话数；超出直接拒绝，而不是排队等待。
@@ -63,6 +66,7 @@ func Load() (*Config, error) {
 		DataDir:        env("RIGD_DATA_DIR", defaultDataDir()),
 		Image:          env("RIGD_IMAGE", "electron-acceptance-rig:latest"),
 		DockerBin:      env("RIGD_DOCKER", "docker"),
+		MediaDir:       env("RIGD_MEDIA_DIR", ""),
 		MaxSessions:    envInt("RIGD_MAX_SESSIONS", 2),
 		IdleTimeout:    envDuration("RIGD_IDLE_TIMEOUT", 10*time.Minute),
 		MaxLifetime:    envDuration("RIGD_MAX_LIFETIME", 40*time.Minute),

@@ -75,6 +75,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *session.Manager) {
 		CDPPortBase: 29222, VNCPortBase: 26080,
 		Display: config.DisplayConfig{Width: 1280, Height: 800},
 		Record:  config.RecordConfig{FPS: 20, CRF: 26},
+		MediaDir: dir,
 	}
 	if err := os.MkdirAll(cfg.SessionsDir(), 0o755); err != nil {
 		t.Fatalf("创建会话目录失败: %v", err)
@@ -140,15 +141,15 @@ func TestCreateListStopSession(t *testing.T) {
 	srv, _ := newTestServer(t)
 
 	resp, created := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "DashPlayer", "ref": "feat/x"})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("创建会话期望 201，实际 %d: %v", resp.StatusCode, created)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("创建会话期望 202，实际 %d: %v", resp.StatusCode, created)
 	}
 	id, _ := created["id"].(string)
 	if id == "" {
 		t.Fatalf("返回里没有 id: %v", created)
 	}
-	if created["status"] != string(store.StatusReady) {
-		t.Fatalf("新会话应为 ready，实际 %v", created["status"])
+	if created["status"] != string(store.StatusStarting) {
+		t.Fatalf("刚创建的会话应为 starting，实际 %v", created["status"])
 	}
 	if created["ref"] != "feat/x" {
 		t.Fatalf("ref 未透传: %v", created["ref"])
@@ -185,11 +186,11 @@ func TestCreateSessionRequiresApp(t *testing.T) {
 func TestCreateSessionTooMany(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for i := 0; i < 2; i++ {
-		if resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "A"}); resp.StatusCode != http.StatusCreated {
+		if resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "sample"}); resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("第 %d 个会话应成功: %v", i+1, body)
 		}
 	}
-	resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "A"})
+	resp, body := postJSON(t, srv.URL+"/api/sessions", map[string]any{"app": "sample"})
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("期望 429，实际 %d: %v", resp.StatusCode, body)
 	}

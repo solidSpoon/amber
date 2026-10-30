@@ -119,6 +119,8 @@ func testConfig(t *testing.T) *config.Config {
 		CDPPortBase: 19222, VNCPortBase: 16080,
 		Display: config.DisplayConfig{Width: 1280, Height: 800},
 		Record:  config.RecordConfig{FPS: 20, CRF: 26},
+		// 测试里给一个存在的目录，模拟已配置的验收素材
+		MediaDir: dir,
 	}
 	if err := os.MkdirAll(cfg.SessionsDir(), 0o755); err != nil {
 		t.Fatalf("创建会话根目录失败: %v", err)
@@ -147,7 +149,7 @@ func TestStartLaunchesContainerAndBecomesReady(t *testing.T) {
 	ctx := context.Background()
 	m, st, fake, _ := newTestManager(t)
 
-	sess, err := m.Start(ctx, Options{App: "DashPlayer", Ref: "main"})
+	sess, err := m.Start(ctx, Options{App: "sample", Ref: ""})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -170,8 +172,9 @@ func TestStartLaunchesContainerAndBecomesReady(t *testing.T) {
 	if spec.Env["RIG_DEBUG_PORT"] != itoa(sess.CDPPort) {
 		t.Fatalf("调试端口未注入: %v", spec.Env)
 	}
-	if len(spec.Mounts) != 1 || spec.Mounts[0].ContainerPath != "/out" {
-		t.Fatalf("挂载不对: %+v", spec.Mounts)
+	// /out 必须有；配置了素材目录时会多挂一个只读的 /assets
+	if len(spec.Mounts) == 0 || spec.Mounts[0].ContainerPath != "/out" {
+		t.Fatalf("必须挂载 /out: %+v", spec.Mounts)
 	}
 
 	// 会话目录与录像目录要提前建好，容器才有地方写
@@ -189,13 +192,13 @@ func TestStartRejectsBeyondMaxSessions(t *testing.T) {
 	ctx := context.Background()
 	m, _, _, _ := newTestManager(t)
 
-	if _, err := m.Start(ctx, Options{App: "A"}); err != nil {
+	if _, err := m.Start(ctx, Options{App: "sample"}); err != nil {
 		t.Fatalf("第 1 个会话应成功: %v", err)
 	}
-	if _, err := m.Start(ctx, Options{App: "A"}); err != nil {
+	if _, err := m.Start(ctx, Options{App: "sample"}); err != nil {
 		t.Fatalf("第 2 个会话应成功: %v", err)
 	}
-	if _, err := m.Start(ctx, Options{App: "A"}); !errors.Is(err, ErrTooManySessions) {
+	if _, err := m.Start(ctx, Options{App: "sample"}); !errors.Is(err, ErrTooManySessions) {
 		t.Fatalf("第 3 个会话应被拒绝，实际 %v", err)
 	}
 }
@@ -205,7 +208,7 @@ func TestRecordWritesAuditWithVideoOffset(t *testing.T) {
 	ctx := context.Background()
 	m, st, _, insp := newTestManager(t)
 
-	sess, err := m.Start(ctx, Options{App: "DashPlayer", Ref: "main"})
+	sess, err := m.Start(ctx, Options{App: "sample", Ref: ""})
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
@@ -370,4 +373,40 @@ func fmtInt(n int) string {
 		n /= 10
 	}
 	return string(digits)
+}
+
+// 应用注册表决定容器里拿到哪些环境变量；配错了容器会起不来，所以单独钉一条。
+func TestStartInjectsAppContract(t *testing.T) {
+	ctx := context.Background()
+	m, _, fake, _ := newTestManager(t)
+
+	if _, err := m.Start(ctx, Options{App: "DashPlayer", Ref: "feat/x"}); err != nil {
+		t.Fatalf("起会话失败: %v", err)
+	}
+	env := fake.runSpecs[0].Env
+	want := map[string]string{
+		"RIG_GIT_URL":      "https://github.com/solidSpoon/DashPlayer.git",
+		"RIG_GIT_REF":      "feat/x",
+		"RIG_APP_DIR":      "/app",
+		"RIG_BUILD_SCRIPT": "/opt/apps/dashplayer/build.sh",
+		"RIG_BOOTSTRAP":    "/opt/apps/dashplayer/bootstrap.mjs",
+		"RIG_APP_NAME":     "DashPlayer",
+	}
+	for key, value := range want {
+		if env[key] != value {
+			t.Fatalf("%s 期望 %q，实际 %q", key, value, env[key])
+		}
+	}
+}
+
+// 未知应用必须启动前就报错，不能悄悄起一个空容器。
+func TestStartRejectsUnknownApp(t *testing.T) {
+	ctx := context.Background()
+	m, _, fake, _ := newTestManager(t)
+	if _, err := m.Start(ctx, Options{App: "不存在的应用"}); err == nil {
+		t.Fatal("未知应用应报错")
+	}
+	if len(fake.runSpecs) != 0 {
+		t.Fatalf("未知应用不应启动容器: %v", fake.runSpecs)
+	}
 }

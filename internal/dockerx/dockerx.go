@@ -19,9 +19,12 @@ import (
 	"time"
 )
 
-// Mount 一个目录挂载。宿主机路径 → 容器内路径。
+// Mount 一个挂载。Source 既可以是宿主路径，也可以是 docker 命名卷名（-v 语法两者同形）。
+//
+// 用命名卷存依赖缓存是关键：换分支/换会话复用同一份 node_modules 与 yarn 缓存，
+// 否则每次起会话都要重新下载 G 级依赖。
 type Mount struct {
-	HostPath      string
+	Source        string
 	ContainerPath string
 	ReadOnly      bool
 }
@@ -107,7 +110,7 @@ func (c *CLI) Run(ctx context.Context, spec Spec) (string, error) {
 		args = append(args, "-e", k+"="+spec.Env[k])
 	}
 	for _, m := range spec.Mounts {
-		mount := m.HostPath + ":" + m.ContainerPath
+		mount := m.Source + ":" + m.ContainerPath
 		if m.ReadOnly {
 			mount += ":ro"
 		}
