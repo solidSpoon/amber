@@ -123,6 +123,7 @@ export default function SessionDetail({ id }: { id: string }) {
               sessionId={session.id}
               event={event}
               gapMs={gapBefore(events, index)}
+              display={session.display}
               onZoom={() => setZoomed(event)}
             />
           ))}
@@ -139,7 +140,9 @@ export default function SessionDetail({ id }: { id: string }) {
         </div>
       </details>
 
-      {zoomed && <Lightbox sessionId={session.id} event={zoomed} onClose={() => setZoomed(null)} />}
+      {zoomed && (
+        <Lightbox sessionId={session.id} event={zoomed} display={session.display} onClose={() => setZoomed(null)} />
+      )}
     </div>
   );
 }
@@ -154,11 +157,13 @@ function StepRow({
   sessionId,
   event,
   gapMs,
+  display,
   onZoom,
 }: {
   sessionId: string;
   event: SessionEvent;
   gapMs: number;
+  display?: Session['display'];
   onZoom: () => void;
 }) {
   const [resultOpen, setResultOpen] = useState(false);
@@ -219,14 +224,24 @@ function StepRow({
           )}
         </div>
 
-        <StepMedia sessionId={sessionId} event={event} onZoom={onZoom} />
+        <StepMedia sessionId={sessionId} event={event} display={display} onZoom={onZoom} />
       </li>
     </>
   );
 }
 
 /** 小窗播放：进入视口就播，离开就停；点开看大图 */
-function StepMedia({ sessionId, event, onZoom }: { sessionId: string; event: SessionEvent; onZoom: () => void }) {
+function StepMedia({
+  sessionId,
+  event,
+  display,
+  onZoom,
+}: {
+  sessionId: string;
+  event: SessionEvent;
+  display?: Session['display'];
+  onZoom: () => void;
+}) {
   const ref = useRef<HTMLVideoElement>(null);
   const [inView, setInView] = useState(false);
 
@@ -255,15 +270,19 @@ function StepMedia({ sessionId, event, onZoom }: { sessionId: string; event: Ses
       aria-label={`${event.caption} 的画面`}
     >
       {event.clip ? (
-        <video
-          ref={ref}
-          src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
-          muted
-          loop
-          playsInline
-          preload="metadata"
-          className="block aspect-video w-full object-cover"
-        />
+        // 按"这一步当时"的窗口矩形裁剪：窗口中途变过（登录后切全屏），
+        // 用整场最后的几何去裁前面的片段会裁出「窗口 + 一圈黑边」
+        <ScreenStage frame={event.frame} display={display} className="rounded-none border-0">
+          <video
+            ref={ref}
+            src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
+            muted
+            loop
+            playsInline
+            preload="metadata"
+            className="size-full"
+          />
+        </ScreenStage>
       ) : (
         <img
           src={`/api/sessions/${sessionId}/artifacts/${event.shot}`}
@@ -280,7 +299,17 @@ function StepMedia({ sessionId, event, onZoom }: { sessionId: string; event: Ses
 }
 
 /** 放大：整段 4 秒带控件播放，Esc 或点背景关闭 */
-function Lightbox({ sessionId, event, onClose }: { sessionId: string; event: SessionEvent; onClose: () => void }) {
+function Lightbox({
+  sessionId,
+  event,
+  display,
+  onClose,
+}: {
+  sessionId: string;
+  event: SessionEvent;
+  display?: Session['display'];
+  onClose: () => void;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -295,15 +324,18 @@ function Lightbox({ sessionId, event, onClose }: { sessionId: string; event: Ses
       onClick={onClose}
     >
       {event.clip ? (
-        <video
-          src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
-          autoPlay
-          controls
-          muted
-          loop
-          className="max-h-[80vh] w-auto max-w-full rounded-md bg-neutral-950"
-          onClick={(e) => e.stopPropagation()}
-        />
+        <div className="w-[min(90vw,1100px)]" onClick={(e) => e.stopPropagation()}>
+          <ScreenStage frame={event.frame} display={display}>
+            <video
+              src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
+              autoPlay
+              controls
+              muted
+              loop
+              className="size-full"
+            />
+          </ScreenStage>
+        </div>
       ) : event.shot ? (
         <img
           src={`/api/sessions/${sessionId}/artifacts/${event.shot}`}

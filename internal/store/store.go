@@ -122,6 +122,8 @@ type Event struct {
 	ArtifactPath  string
 	// Shot 这一步的画面（相对会话目录）；失败也截，报告里最有用的就是失败那张。
 	Shot string
+	// Frame 写这条记录时窗口的矩形。窗口会在会话中途变，裁剪必须按"当时"的几何来。
+	Frame Rect
 }
 
 // Artifact 会话产物（截图/录像/报告）。
@@ -420,11 +422,13 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 		e.Kind = "action"
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events
-		(session_id, seq, at, tool, args, ok, kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(session_id, seq, at, tool, args, ok, kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot,
+		 frame_x, frame_y, frame_w, frame_h)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, seq, e.At.UTC().Format(time.RFC3339Nano), e.Tool, args, ok,
 		e.Kind, e.Caption, e.Intent, e.Expect,
-		e.DurationMS, e.VideoOffsetMS, e.Result, e.ArtifactPath, e.Shot); err != nil {
+		e.DurationMS, e.VideoOffsetMS, e.Result, e.ArtifactPath, e.Shot,
+		e.Frame.X, e.Frame.Y, e.Frame.Width, e.Frame.Height); err != nil {
 		return 0, fmt.Errorf("写入事件失败: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -436,7 +440,8 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 // ListEvents 返回会话的全部事件，按 seq 升序。
 func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, seq, at, tool, args, ok,
-		kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot
+		kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot,
+		frame_x, frame_y, frame_w, frame_h
 		FROM events WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("查询事件失败: %w", err)
@@ -453,7 +458,8 @@ func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, erro
 		)
 		if err := rows.Scan(&e.ID, &e.SessionID, &e.Seq, &at, &e.Tool, &args, &ok,
 			&e.Kind, &e.Caption, &e.Intent, &e.Expect,
-			&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath, &e.Shot); err != nil {
+			&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath, &e.Shot,
+			&e.Frame.X, &e.Frame.Y, &e.Frame.Width, &e.Frame.Height); err != nil {
 			return nil, fmt.Errorf("扫描事件失败: %w", err)
 		}
 		e.Args = json.RawMessage(args)

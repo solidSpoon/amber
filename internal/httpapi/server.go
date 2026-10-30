@@ -327,6 +327,8 @@ type eventDTO struct {
 	// Shot 这一步的画面；Clip 表示有没有可点的 4 秒短片
 	Shot string `json:"shot,omitempty"`
 	Clip bool   `json:"clip"`
+	// Frame 这一步当时窗口的矩形（裁剪用；窗口中途变过也不会错位）
+	Frame *geometryDTO `json:"frame,omitempty"`
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +346,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 			OK: e.OK, Kind: e.Kind, Caption: e.Caption, Intent: e.Intent, Expect: e.Expect,
 			DurationMS: e.DurationMS, VideoOffsetMS: e.VideoOffsetMS,
 			Result: e.Result, Artifact: e.ArtifactPath, Shot: e.Shot,
-			Clip: e.VideoOffsetMS >= 0 && hasVideo,
+			Clip: e.VideoOffsetMS >= 0 && hasVideo, Frame: toGeometry(e.Frame),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})

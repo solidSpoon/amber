@@ -65,6 +65,8 @@ export interface SessionEvent {
   artifact?: string;
   /** 这一步的画面，如 shots/150405.123-click.jpg */
   shot?: string;
+  /** 这一步当时窗口的矩形（窗口中途变过，裁剪得按当时算） */
+  frame?: Geometry;
   /** 有没有可点的 4 秒短片 */
   clip: boolean;
 }

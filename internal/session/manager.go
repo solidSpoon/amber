@@ -361,16 +361,14 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 	if err := m.waitContainerReady(ctx, containerName); err != nil {
 		m.log.Warn("等待容器就绪标记超时，会话仍继续", "session", id, "err", err)
 	}
-	if frame, display, err := m.readWindowGeometry(ctx, containerName); err != nil {
+	if frame, display, err := m.probeWindowGeometry(ctx, containerName); err != nil {
 		m.log.Warn("读不到画面几何，界面将按整幅画面显示", "session", id, "err", err)
 	} else {
 		sess.Frame = frame
 		sess.Display = display
-		if frame.Width != display.Width || frame.Height != display.Height {
-			m.log.Warn("应用窗口没有铺满虚拟屏，录像只保证了窗口区域",
-				"session", id, "frame", fmt.Sprintf("%dx%d", frame.Width, frame.Height),
-				"display", fmt.Sprintf("%dx%d", display.Width, display.Height))
-		}
+		m.log.Info("画面几何", "session", id,
+			"window", fmt.Sprintf("%dx%d", frame.Width, frame.Height),
+			"display", fmt.Sprintf("%dx%d", display.Width, display.Height))
 	}
 
 	sess.Status = store.StatusReady
@@ -609,12 +607,20 @@ func (m *Manager) writeEvent(ctx context.Context, id string, step Step, result, 
 	if caption == "" {
 		caption = captionFor(step, nil)
 	}
+	// 记下写这条记录时窗口的矩形：报告按它裁剪片段，窗口中途变过也不会错位
+	m.mu.Lock()
+	frame := store.Rect{}
+	if live, ok := m.live[id]; ok {
+		frame = live.session.Frame
+	}
+	m.mu.Unlock()
+
 	// 审计是旁路：写失败只告警，不影响工具本身的成败
 	if _, err := m.store.AppendEvent(ctx, store.Event{
 		SessionID: id, At: time.Now(), Tool: step.Tool, Args: rawArgs, OK: ok, Kind: kind,
 		Caption: caption, Intent: step.Intent, Expect: step.Expect,
 		DurationMS: durationMS, VideoOffsetMS: offset, Result: truncate(result, 2000),
-		ArtifactPath: artifact, Shot: step.Shot,
+		ArtifactPath: artifact, Shot: step.Shot, Frame: frame,
 	}); err != nil {
 		m.log.Error("写审计事件失败", "session", id, "tool", step.Tool, "err", err)
 	}
@@ -911,17 +917,8 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		cancel()
 		if dialErr == nil {
 			live.inspector = inspector
-			// 重启后窗口可能被应用自己缩回去了：重新铺满。
-			// 只在「原本就是铺满取的景」时才这么干——录像是固定区域，
-			// 取景本来就只有一块窗口时改窗口反而会跟录像错位。
-			if frame, display, geoErr := m.readWindowGeometry(ctx, "rigd-"+sess.ID); geoErr == nil {
-				if frame.Width == display.Width && frame.Height == display.Height {
-					if err := m.fitWindow(ctx, "rigd-"+sess.ID); err == nil {
-						if f2, d2, err2 := m.readWindowGeometry(ctx, "rigd-"+sess.ID); err2 == nil {
-							frame, display = f2, d2
-						}
-					}
-				}
+			// 接管时同样不碰窗口，只重新量一次几何（应用重启后可能换了尺寸）
+			if frame, display, geoErr := m.probeWindowGeometry(ctx, "rigd-"+sess.ID); geoErr == nil {
 				sess.Frame = frame
 				sess.Display = display
 				_ = m.store.UpdateSession(ctx, sess)

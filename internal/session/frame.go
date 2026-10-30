@@ -43,43 +43,6 @@ type windowMeta struct {
 	Filled bool `json:"filled"`
 }
 
-// fitWindow 在容器里把应用窗口铺满虚拟屏。
-//
-// 走容器内的 WM（wmctrl），不走 CDP：Browser 域只挂在浏览器端点上，
-// 从页面目标发 Browser.getWindowForTarget 会直接报 "wasn't found"。
-// 顺带的好处是与应用无关——Tauri、Qt、GTK 的应用同样适用。
-func (m *Manager) fitWindow(ctx context.Context, container string) error {
-	display := fmt.Sprintf("DISPLAY=:%d", m.cfg.Display.Num)
-	if _, err := m.docker.Exec(ctx, container, "env", display, "RIG_OUT=/out", "rig-fit-window"); err != nil {
-		return err
-	}
-	return nil
-}
-
-// readWindowGeometry 读容器写的画面几何（rig-fit-window 落盘的那份）。
-func (m *Manager) readWindowGeometry(ctx context.Context, container string) (store.Rect, store.Rect, error) {
-	out, err := m.docker.Exec(ctx, container, "cat", "/out/logs/window.json")
-	if err != nil {
-		return store.Rect{}, store.Rect{}, err
-	}
-	var meta windowMeta
-	if err := json.Unmarshal([]byte(out), &meta); err != nil {
-		return store.Rect{}, store.Rect{}, fmt.Errorf("解析 window.json 失败: %w", err)
-	}
-	display := store.Rect{Width: meta.Display.Width, Height: meta.Display.Height}
-	frame := store.Rect{
-		X: meta.Window.X, Y: meta.Window.Y,
-		Width: meta.Window.Width, Height: meta.Window.Height,
-	}
-	if !display.Known() {
-		return store.Rect{}, store.Rect{}, errors.New("window.json 缺少虚拟屏尺寸")
-	}
-	if !frame.Known() {
-		return store.Rect{}, store.Rect{}, errors.New("window.json 缺少窗口尺寸")
-	}
-	return frame, display, nil
-}
-
 // waitContainerReady 等容器把「画面取景定下来 + 录屏真的开始了」这件事做完。
 //
 // 光有 CDP 不等于能验收：应用窗口可能还在 960x540，录屏也还没开。
@@ -139,8 +102,8 @@ func (m *Manager) Poster(ctx context.Context, id string) (string, error) {
 
 // probeWindowGeometry 现量一次窗口几何（只读，不改窗口）。
 //
-// 和 readWindowGeometry 的区别很重要：那个读的是 window.json（铺满那一刻的快照），
-// 应用后来自己改了窗口，文件不会变。想知道"现在多大"，只能现场量。
+// 不去读 window.json 那类"某一刻的快照"：应用随时可能自己改窗口，
+// 想知道"现在多大"，只能现场量。
 func (m *Manager) probeWindowGeometry(ctx context.Context, container string) (store.Rect, store.Rect, error) {
 	display := fmt.Sprintf("DISPLAY=:%d", m.cfg.Display.Num)
 	out, err := m.docker.Exec(ctx, container, "env", display, "rig-window-geometry")
