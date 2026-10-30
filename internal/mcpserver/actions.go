@@ -240,8 +240,8 @@ func (s *Server) doAssert(ctx context.Context, a assertArgs) error {
 // ---- 批 -------------------------------------------------------------------
 
 const (
-	maxBatchSteps = 50
-	batchTimeout  = 2 * time.Minute
+	maxRunSteps = 50
+	runTimeout  = 2 * time.Minute
 )
 
 // batchStep 批里的一步：动作名 + 该动作自己的参数。
@@ -276,8 +276,8 @@ type stepExtra struct {
 	Value    any
 }
 
-// runBatchStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
-func (s *Server) runBatchStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
+// runStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
+func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
 	base := stepArgs{Intent: st.Intent, Expect: st.Expect}
 	switch st.Action {
 	case "snapshot":
@@ -328,29 +328,29 @@ func (s *Server) runBatchStep(ctx context.Context, sid string, st batchStep) (st
 	}
 }
 
-// doBatch 连续执行若干步；任何一步失败就停下，并把进度说清楚。
+// doRun 连续执行若干步；任何一步失败就停下，并把进度说清楚。
 //
 // 失败不返回 Go error：模型需要知道"跑到第几步、剩下没跑什么"，
 // 用错误把它吞掉反而更糊涂。会话本身的状态在报告里，不靠这里的返回值。
-func (s *Server) doBatch(ctx context.Context, a batchArgs) (string, batchResult, error) {
+func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error) {
 	if len(a.Steps) == 0 {
-		return "", batchResult{}, errors.New("steps 不能为空")
+		return "", runResult{}, errors.New("steps 不能为空")
 	}
-	if len(a.Steps) > maxBatchSteps {
-		return "", batchResult{}, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxBatchSteps, len(a.Steps))
+	if len(a.Steps) > maxRunSteps {
+		return "", runResult{}, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxRunSteps, len(a.Steps))
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, batchTimeout)
+	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
 	var b strings.Builder
-	res := batchResult{Steps: make([]batchStepResult, 0, len(a.Steps))}
+	res := runResult{Steps: make([]runStepResult, 0, len(a.Steps))}
 	for i, st := range a.Steps {
-		msg, extra, err := s.runBatchStep(ctx, a.SessionID, st)
+		msg, extra, err := s.runStep(ctx, a.SessionID, st)
 		if err != nil {
 			fmt.Fprintf(&b, "%d. %s ✗ %v\n", i+1, st.Action, err)
 			fmt.Fprintf(&b, "已停止：后面 %d 步没有执行。", len(a.Steps)-i-1)
-			res.Steps = append(res.Steps, batchStepResult{
+			res.Steps = append(res.Steps, runStepResult{
 				Index: i + 1, Action: st.Action, OK: false, Text: err.Error(), Elements: extra.Elements, Value: extra.Value,
 			})
 			res.StoppedAt = i + 1
@@ -362,7 +362,7 @@ func (s *Server) doBatch(ctx context.Context, a batchArgs) (string, batchResult,
 			b.WriteString(extra.Text)
 			b.WriteString("\n")
 		}
-		res.Steps = append(res.Steps, batchStepResult{
+		res.Steps = append(res.Steps, runStepResult{
 			Index: i + 1, Action: st.Action, OK: true, Text: msg, Elements: extra.Elements, Value: extra.Value,
 		})
 	}
