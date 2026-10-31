@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeftIcon, ExternalLinkIcon, CheckIcon, XIcon, PauseIcon, PlayIcon, Maximize2Icon } from 'lucide-react';
+import { ArrowLeftIcon, ExternalLinkIcon, PauseIcon, PlayIcon, Maximize2Icon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -137,37 +137,16 @@ export default function SessionDetail({ id }: { id: string }) {
           </EmptyHeader>
         </Empty>
       ) : (
-        <ol className="flex flex-col gap-5">
+        <ol className="flex flex-col divide-y divide-border/70">
           {batchGroups(events).map((group, index) => (
-            <li key={group.start} className="rounded-lg border bg-card/40 p-4 sm:p-5">
-              {/* 一批 = 一次连续操作 = 一条片段，所以报告的基本单位是"这一批"，
-                  不是批里的某一步：批头写清这批干了什么，明细收在下面。 */}
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                  {String(index + 1).padStart(2, '0')}
-                </span>
-                <span className="text-sm font-medium">{summarizeBatch(group.events)}</span>
-                <span className="text-[11px] text-muted-foreground">
-                  {group.events.length} 步
-                  <span className="mx-1">·</span>
-                  <span className="font-mono tabular-nums">
-                    {formatClock(Math.max(0, group.start) / 1000)}
-                  </span>
-                </span>
-              </div>
-              <ol className="mt-3 flex flex-col divide-y divide-border/40">
-                {group.events.map((event) => (
-                  <StepRow
-                    key={event.seq}
-                    sessionId={session.id}
-                    event={event}
-                    display={session.display}
-                    isClipAnchor={clipAnchor.get(event.seq) === event.seq}
-                    onZoom={() => setZoomed(event)}
-                  />
-                ))}
-              </ol>
-            </li>
+            <BatchRow
+              key={group.start}
+              index={index + 1}
+              sessionId={session.id}
+              group={group}
+              display={session.display}
+              onZoom={setZoomed}
+            />
           ))}
         </ol>
       )}
@@ -195,121 +174,6 @@ export default function SessionDetail({ id }: { id: string }) {
  * 片段自动播（像动图），滑出视口就暂停——一页几十步全在解码没必要。
  * 想看清楚再点它，切成大图。
  */
-function StepRow({
-  sessionId,
-  event,
-  display,
-  isClipAnchor,
-  onZoom,
-}: {
-  sessionId: string;
-  event: SessionEvent;
-  display?: Session['display'];
-  isClipAnchor: boolean;
-  onZoom: () => void;
-}) {
-  const [resultOpen, setResultOpen] = useState(false);
-  // 只读步骤（求值、等待）不改界面，也不需要画面：压成一行，别和有画面的动作抢版面
-  const isReadOnly = event.tool === 'eval' || event.tool === 'wait';
-  const isAssert = event.kind === 'assert';
-  const isNote = event.kind === 'note';
-  const failed = !event.ok;
-  // 每批只放一条片段；失败的步骤额外配它自己的截图（那时最需要看现场）。
-  // 其余步骤不逐行再摆截图：视频和截图交替出现，读者会以为片段在乱给。
-  const hasMedia = Boolean(event.clip && isClipAnchor) || (failed && Boolean(event.shot));
-
-  if (isReadOnly) {
-    return (
-      <li className="flex items-baseline gap-2 py-1 text-[11px] text-muted-foreground/75">
-        <span className="font-mono tabular-nums">{String(event.seq).padStart(2, '0')}</span>
-        <span>{event.caption}</span>
-        <span className="truncate">{resultHead(event.result)}</span>
-        <span className="ml-auto font-mono tabular-nums text-muted-foreground/50">
-          {formatClock(Math.max(0, event.videoOffsetMs) / 1000)}
-        </span>
-      </li>
-    );
-  }
-
-  return (
-    <>
-      <li
-        className={`grid gap-3 py-5 md:gap-6 ${
-          hasMedia ? 'md:grid-cols-[minmax(0,1fr)_clamp(340px,46vw,640px)]' : 'md:grid-cols-1'
-        }`}
-      >
-        <div className="min-w-0">
-          <div className="flex items-baseline gap-2">
-            <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-              {String(event.seq).padStart(2, '0')}
-            </span>
-            <span className={`text-sm font-medium ${failed ? 'text-destructive' : ''}`}>
-              {event.caption || event.tool}
-            </span>
-            {isAssert && (
-              <span className={`inline-flex items-center gap-0.5 text-[11px] ${event.ok ? 'text-success' : 'text-destructive'}`}>
-                {event.ok ? <CheckIcon className="size-3" /> : <XIcon className="size-3" />}
-                {event.ok ? '成立' : '不成立'}
-              </span>
-            )}
-            {event.videoOffsetMs >= 0 && (
-              <span className="ml-auto font-mono text-[11px] text-muted-foreground tabular-nums">
-                {formatClock(event.videoOffsetMs / 1000)}
-              </span>
-            )}
-          </div>
-
-          {event.intent && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">意图：{event.intent}</p>}
-          {event.expect && <p className="text-xs leading-relaxed text-muted-foreground">期望：{event.expect}</p>}
-
-          {event.result && !isNote && (
-            <div className="mt-1.5">
-              {/* 结果先只给第一行：一句话说清"这一步得到了什么"。
-                  元素清单这类长内容折在「展开」后面，不占版面也不打断节奏。 */}
-              <p
-                className={`text-xs leading-relaxed break-words whitespace-pre-wrap ${
-                  failed ? 'text-destructive' : 'text-muted-foreground'
-                }`}
-              >
-                {isAssert ? `证据：${resultHead(event.result).replace(/^断言(不?)成立：/, '')}` : resultHead(event.result)}
-              </p>
-              {resultRest(event.result) && (
-                <>
-                  {resultOpen && (
-                    <p
-                      className={`mt-1 text-xs leading-relaxed break-words whitespace-pre-wrap ${
-                        failed ? 'text-destructive' : 'text-muted-foreground'
-                      }`}
-                    >
-                      {resultRest(event.result)}
-                    </p>
-                  )}
-                  <button
-                    onClick={() => setResultOpen((v) => !v)}
-                    className="text-[11px] text-muted-foreground/80 underline-offset-2 hover:underline"
-                  >
-                    {resultOpen ? '收起' : '展开完整结果'}
-                  </button>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-
-        {hasMedia && (
-          <StepMedia
-            sessionId={sessionId}
-            event={event}
-            display={display}
-            isClipAnchor={isClipAnchor}
-            onZoom={onZoom}
-          />
-        )}
-      </li>
-    </>
-  );
-}
-
 /** 小窗播放：进入视口就播，离开就停；点开看大图 */
 function StepMedia({
   sessionId,
@@ -603,9 +467,81 @@ function LogPanel({ sessionId }: { sessionId: string }) {
 }
 
 
+/**
+ * 一批 = 报告里的一个步骤。
+ *
+ * 一批只对应一条录像，所以读者关心的是"这一批做了什么、结果如何"，
+ * 不是批内的每一下点击。批头一句话，批内明细压成细行，画面放在末尾——
+ * 看完文字正好看到结果。
+ */
+function BatchRow({
+  index,
+  sessionId,
+  group,
+  display,
+  onZoom,
+}: {
+  index: number;
+  sessionId: string;
+  group: { start: number; events: SessionEvent[] };
+  display?: Session['display'];
+  onZoom: (event: SessionEvent) => void;
+}) {
+  const failed = group.events.filter((e) => !e.ok);
+  const withClip = group.events.find((e) => e.clip);
+  const end = Math.max(0, group.events[group.events.length - 1].videoOffsetMs);
+
+  return (
+    <li className="flex flex-col gap-2 py-4">
+      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+        <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+          {String(index).padStart(2, '0')}
+        </span>
+        <span className={`text-sm font-medium ${failed.length ? 'text-destructive' : ''}`}>
+          {summarizeBatch(group.events)}
+        </span>
+        <span className="ml-auto font-mono text-[11px] text-muted-foreground tabular-nums">
+          {formatClock(Math.max(0, group.start) / 1000)}
+          {end > group.start + 500 && `–${formatClock(end / 1000)}`}
+        </span>
+      </div>
+
+      {/* 批内明细：一行一步，只写做什么和结果，不铺开意图/期望 */}
+      <ul className="flex flex-col gap-0.5 pl-6 text-[11px] text-muted-foreground/80">
+        {group.events.filter((e) => !isSleepStep(e)).map((event) => (
+          <li key={event.seq} className="flex items-baseline gap-2">
+            <span className="text-muted-foreground/50">·</span>
+            <span className={event.ok ? '' : 'text-destructive'}>{event.caption}</span>
+            {resultHead(event.result) && (
+              <span className="truncate text-muted-foreground/60">{resultHead(event.result)}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      {withClip && (
+        <div className="pl-6">
+          <StepMedia
+            sessionId={sessionId}
+            event={withClip}
+            display={display}
+            isClipAnchor
+            onZoom={() => onZoom(withClip)}
+          />
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** 睡眠用的 eval 是实现细节，不该出现在报告里 */
+function isSleepStep(e: SessionEvent): boolean {
+  return e.tool === 'eval' && /new Promise\([^)]*setTimeout/.test(JSON.stringify(e.args ?? ''));
+}
+
 /** 一批的标题：用批里的动作名拼一句话，读者先看这句就够 */
 function summarizeBatch(events: SessionEvent[]): string {
-  const names = events.filter((e) => e.kind !== 'note').map((e) => e.caption.replace(/^点击 /, ''));
+  const names = events.filter((e) => e.kind !== 'note' && !isSleepStep(e)).map((e) => e.caption.replace(/^点击 /, ''));
   if (names.length === 0) return '一批操作';
   const head = names.slice(0, 3).join(' → ');
   return names.length > 3 ? `${head} 等 ${names.length} 个动作` : head;
@@ -628,14 +564,6 @@ function batchGroups(events: SessionEvent[]): { start: number; events: SessionEv
 /** 结果的第一行 = 这一步的结论 */
 function resultHead(text: string): string {
   return text.split('\n').find((line) => line.trim() !== '')?.trim() ?? '';
-}
-
-/** 第一行之外的内容：只在展开时显示 */
-function resultRest(text: string): string {
-  const lines = text.split('\n');
-  const first = lines.findIndex((line) => line.trim() !== '');
-  if (first < 0) return '';
-  return lines.slice(first + 1).join('\n').trim();
 }
 
 /** 秒数 → m:ss */
