@@ -310,16 +310,11 @@ func clipWindow(target store.Event) (startMS, lengthMS int64) {
 	return start, 4000
 }
 
-// 保证 store.Event 里的字段在本包里都用到（避免只加了一半）。
-var _ = store.Event{}.Shot
-
 // masterVideo 整场录像（母片）的路径。收尾时它会被删掉，只剩片段。
 //
-// 老会话把路径存在库里（VideoPath），新会话一律按会话目录推算。
+// 位置由容器启动脚本约定（RIG_OUT=/out），不再存进库里：
+// 同一个事实存两份，早晚会有新会话写出一个对不上的路径。
 func masterVideo(sess store.Session) string {
-	if sess.VideoPath != "" {
-		return sess.VideoPath
-	}
 	return filepath.Join(sess.Dir, "video", "session.mp4")
 }
 

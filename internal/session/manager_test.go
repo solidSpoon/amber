@@ -336,13 +336,9 @@ func TestStopFinalizesSessionAndDropsRecording(t *testing.T) {
 		t.Fatalf("应停止容器: %v", fake.stopped)
 	}
 
-	// 整场录像没人从头看，收尾就删掉；库里也不该再挂一个 video 产物
+	// 整场录像没人从头看，收尾就删掉，只留每一批的片段
 	if _, err := os.Stat(videoPath); !os.IsNotExist(err) {
 		t.Fatalf("整场录像应被删除，实际仍存在: %v", err)
-	}
-	artifacts, err := st.ListArtifacts(ctx, sess.ID)
-	if err != nil || len(artifacts) != 0 {
-		t.Fatalf("不应再登记录像产物: %+v err=%v", artifacts, err)
 	}
 
 	stored, _ := st.GetSession(ctx, sess.ID)

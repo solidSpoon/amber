@@ -286,14 +286,6 @@ func runInputSchema() *jsonschema.Schema {
 	return schema
 }
 
-func mustSessionDir(ctx context.Context, s *Server, id string) string {
-	dir, err := s.sessionDir(ctx, id)
-	if err != nil {
-		return ""
-	}
-	return dir
-}
-
 type waitArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
 	stepArgs
@@ -394,39 +386,6 @@ type captureToolResult struct {
 	Text     string            `json:"text"`
 }
 
-type evalResult struct {
-	// 用 any 而不是 json.RawMessage：后者会被 SDK 推成"只允许 null/array"的输出 schema，
-	// 而页面断言最常返回的是对象（{t:..., paused:...}），会被校验直接拒掉。
-	Value any `json:"value"`
-}
-
 func text(s string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: s}}}
 }
-
-func sanitizeLabel(label string) string {
-	label = strings.TrimSpace(label)
-	if label == "" {
-		return "shot"
-	}
-	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-", ":", "-")
-	out := replacer.Replace(label)
-	if len(out) > 40 {
-		out = out[:40]
-	}
-	return out
-}
-
-func (s *Server) sessionDir(ctx context.Context, id string) (string, error) {
-	sess, err := s.manager.Get(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	if sess.Dir == "" {
-		return "", fmt.Errorf("会话 %s 没有目录", id)
-	}
-	return sess.Dir, nil
-}
-
-// 编译期断言：确保 store 的终态语义被引用（避免误删依赖）。
-var _ = store.StatusFinished

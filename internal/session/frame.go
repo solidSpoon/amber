@@ -34,7 +34,6 @@ type windowMeta struct {
 		Width  int `json:"width"`
 		Height int `json:"height"`
 	} `json:"window"`
-	Filled bool `json:"filled"`
 }
 
 // waitContainerReady 等容器把「画面取景定下来 + 录屏真的开始了」这件事做完。

@@ -69,10 +69,10 @@ func (r Rect) Known() bool { return r.Width > 0 && r.Height > 0 }
 type Session struct {
 	ID string
 	// Title 这次验收的意图（一句话，调用方给）：会话列表和记录顶部先展示它。
-	Title     string
-	App       string
+	Title string
+	App   string
+	// Ref 来源版本号（commit / tag / build id），只用于记录溯源。
 	Ref       string
-	CommitSHA string
 	Image     string
 	Container string
 	Status    Status
@@ -95,7 +95,6 @@ type Session struct {
 	StartedAt       time.Time
 	EndedAt         time.Time
 	IdleDeadline    time.Time
-	VideoPath       string
 	VideoDurationMS int64
 	Verdict         string
 	Summary         string
@@ -132,16 +131,6 @@ type Event struct {
 	BatchEndMS   int64
 	// BatchIntent 这一段操作为什么做（调用方给 run 的那句话）；记录里当这一段的小标题。
 	BatchIntent string
-}
-
-// Artifact 会话产物（截图/录像/记录）。
-type Artifact struct {
-	ID        int64
-	SessionID string
-	Kind      string
-	Path      string
-	Bytes     int64
-	CreatedAt time.Time
 }
 
 // Sample 一次系统指标采样。
@@ -289,17 +278,17 @@ func parseTime(v sql.NullString) time.Time {
 // CreateSession 写入一条新会话。
 func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions
-		(id, title, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+		(id, title, app, ref, image, container, status, cdp_port, vnc_port, slot, dir,
 		 payload, assets, recipe,
 		 frame_x, frame_y, frame_w, frame_h, display_w, display_h,
-		 created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sess.ID, sess.Title, sess.App, sess.Ref, sess.CommitSHA, sess.Image, sess.Container, string(sess.Status),
+		 created_at, started_at, ended_at, idle_deadline, video_duration_ms, verdict, summary, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.ID, sess.Title, sess.App, sess.Ref, sess.Image, sess.Container, string(sess.Status),
 		sess.CDPPort, sess.VNCPort, sess.Slot, sess.Dir,
 		sess.Payload, sess.Assets, sess.Recipe,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		sess.CreatedAt.UTC().Format(time.RFC3339Nano), formatTime(sess.StartedAt), formatTime(sess.EndedAt),
-		formatTime(sess.IdleDeadline), sess.VideoPath, sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error)
+		formatTime(sess.IdleDeadline), sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error)
 	if err != nil {
 		return fmt.Errorf("写入会话失败: %w", err)
 	}
@@ -313,13 +302,13 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 		payload = ?, assets = ?, recipe = ?,
 		frame_x = ?, frame_y = ?, frame_w = ?, frame_h = ?, display_w = ?, display_h = ?,
 		started_at = ?, ended_at = ?, idle_deadline = ?,
-		video_path = ?, video_duration_ms = ?, verdict = ?, summary = ?, error = ?, commit_sha = ?
+		video_duration_ms = ?, verdict = ?, summary = ?, error = ?
 		WHERE id = ?`,
 		sess.Container, string(sess.Status), sess.CDPPort, sess.VNCPort,
 		sess.Payload, sess.Assets, sess.Recipe,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		formatTime(sess.StartedAt), formatTime(sess.EndedAt), formatTime(sess.IdleDeadline),
-		sess.VideoPath, sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error, sess.CommitSHA, sess.ID)
+		sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error, sess.ID)
 	if err != nil {
 		return fmt.Errorf("更新会话失败: %w", err)
 	}
@@ -333,10 +322,10 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 // ErrNotFound 表示目标记录不存在。
 var ErrNotFound = errors.New("记录不存在")
 
-const sessionColumns = `id, title, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+const sessionColumns = `id, title, app, ref, image, container, status, cdp_port, vnc_port, slot, dir,
 	payload, assets, recipe,
 	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
-	created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error`
+	created_at, started_at, ended_at, idle_deadline, video_duration_ms, verdict, summary, error`
 
 func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 	var (
@@ -345,13 +334,13 @@ func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 		createdAt                        string
 		startedAt, endedAt, idleDeadline sql.NullString
 	)
-	err := sc.Scan(&sess.ID, &sess.Title, &sess.App, &sess.Ref, &sess.CommitSHA, &sess.Image, &sess.Container, &status,
+	err := sc.Scan(&sess.ID, &sess.Title, &sess.App, &sess.Ref, &sess.Image, &sess.Container, &status,
 		&sess.CDPPort, &sess.VNCPort, &sess.Slot, &sess.Dir,
 		&sess.Payload, &sess.Assets, &sess.Recipe,
 		&sess.Frame.X, &sess.Frame.Y, &sess.Frame.Width, &sess.Frame.Height,
 		&sess.Display.Width, &sess.Display.Height,
 		&createdAt, &startedAt, &endedAt, &idleDeadline,
-		&sess.VideoPath, &sess.VideoDurationMS, &sess.Verdict, &sess.Summary, &sess.Error)
+		&sess.VideoDurationMS, &sess.Verdict, &sess.Summary, &sess.Error)
 	if err != nil {
 		return Session{}, err
 	}
@@ -437,7 +426,7 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 		e.Kind, e.Caption, e.Intent, e.Expect,
 		e.DurationMS, e.VideoOffsetMS, e.Result, e.ArtifactPath, e.Shot,
 		e.Frame.X, e.Frame.Y, e.Frame.Width, e.Frame.Height,
-		orDefault(e.BatchStartMS), orDefault(e.BatchEndMS), e.BatchIntent); err != nil {
+		e.BatchStartMS, e.BatchEndMS, e.BatchIntent); err != nil {
 		return 0, fmt.Errorf("写入事件失败: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -458,10 +447,6 @@ func (s *Store) SetBatchMeta(ctx context.Context, sessionID string, fromSeq, toS
 		return fmt.Errorf("写入批次区间失败: %w", err)
 	}
 	return nil
-}
-
-func orDefault(v int64) int64 {
-	return v
 }
 
 // ListEvents 返回会话的全部事件，按 seq 升序。
@@ -496,42 +481,6 @@ func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, erro
 			e.At = t
 		}
 		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-// AddArtifact 记录一个产物文件。
-func (s *Store) AddArtifact(ctx context.Context, a Artifact) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO artifacts (session_id, kind, path, bytes, created_at)
-		VALUES (?, ?, ?, ?, ?)`, a.SessionID, a.Kind, a.Path, a.Bytes, a.CreatedAt.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("写入产物失败: %w", err)
-	}
-	return nil
-}
-
-// ListArtifacts 返回会话产物索引。
-func (s *Store) ListArtifacts(ctx context.Context, sessionID string) ([]Artifact, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, kind, path, bytes, created_at
-		FROM artifacts WHERE session_id = ? ORDER BY id`, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("查询产物失败: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]Artifact, 0, 8)
-	for rows.Next() {
-		var (
-			a         Artifact
-			createdAt string
-		)
-		if err := rows.Scan(&a.ID, &a.SessionID, &a.Kind, &a.Path, &a.Bytes, &createdAt); err != nil {
-			return nil, fmt.Errorf("扫描产物失败: %w", err)
-		}
-		if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
-			a.CreatedAt = t
-		}
-		out = append(out, a)
 	}
 	return out, rows.Err()
 }

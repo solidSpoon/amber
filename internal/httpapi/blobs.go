@@ -93,8 +93,6 @@ func (s *Server) putManifest(w http.ResponseWriter, r *http.Request) {
 
 // listPayloads 列出最近用过的产物与占用，供控制台选payload。
 func (s *Server) listPayloads(w http.ResponseWriter, r *http.Request) {
-	limited := r.URL.Query().Get("limit")
-	_ = limited
 	manifests, err := s.store.RecentManifests(r.Context(), 20)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

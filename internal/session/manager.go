@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/solidSpoon/rigd/internal/cdp"
 	"github.com/solidSpoon/rigd/internal/config"
 	"github.com/solidSpoon/rigd/internal/dockerx"
 	"github.com/solidSpoon/rigd/internal/inspect"
@@ -192,7 +191,6 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 		Title:     strings.TrimSpace(opts.Title),
 		App:       label,
 		Ref:       opts.Commit,
-		CommitSHA: opts.Commit,
 		Image:     m.cfg.Image,
 		Status:    store.StatusStarting,
 		CDPPort:   cdpPort,
@@ -494,7 +492,6 @@ func (m *Manager) finalize(ctx context.Context, sess store.Session, verdict, sum
 			m.log.Warn("删除整场录像失败", "session", sess.ID, "err", err)
 		}
 	}
-	sess.VideoPath = ""
 	if err := m.store.UpdateSession(ctx, sess); err != nil {
 		return sess, err
 	}
@@ -527,6 +524,7 @@ func (m *Manager) Events(ctx context.Context, id string) ([]store.Event, error) 
 // NowOffset 当前时刻相对录像起点的毫秒数（还没有录像时返回 -1）。
 //
 // 批次要用它圈定"这一段连续操作"的起止：一批一条录像，不是每步一条。
+// 记录里每一步的偏移量也走这里——偏移量只有这一个算法，别处不要自己减。
 func (m *Manager) NowOffset(id string) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -534,7 +532,10 @@ func (m *Manager) NowOffset(id string) int64 {
 	if !ok || live.recordingStartMs <= 0 {
 		return -1
 	}
-	return time.Now().UnixMilli() - live.recordingStartMs
+	if offset := time.Now().UnixMilli() - live.recordingStartMs; offset > 0 {
+		return offset
+	}
+	return 0
 }
 
 // SetBatchMeta 给 [fromSeq, toSeq] 这一段补上批次起止与意图。
@@ -830,18 +831,6 @@ func truncate(s string, limit int) string {
 		return s
 	}
 	return s[:limit] + "…(截断)"
-}
-
-// 让 cdp 包的类型在文档层面可见（inspect 依赖它），避免 import 被误删。
-var _ = cdp.Target{}
-
-// tailLines 取文本最后 n 行，用于把容器日志尾部塞进错误信息。
-func tailLines(text string, n int) string {
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	if len(lines) <= n {
-		return strings.Join(lines, "\n")
-	}
-	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
 // MachineView 看板上的一台机器：固定槽位 + 当前占用它的会话（可能没有）。
@@ -1159,23 +1148,9 @@ func (m *Manager) syncFrame(ctx context.Context, id string, insp Inspector) {
 		Caption: fmt.Sprintf("窗口尺寸变化：%dx%d → %dx%d", prev.Width, prev.Height, frame.Width, frame.Height),
 	}
 	note.Shot = m.captureShot(ctx, id, sess.Dir, insp, note)
-	m.writeEvent(ctx, id, note, "应用自己调整了窗口尺寸，画面几何已更新", "", 0, true, m.videoOffset(id))
+	m.writeEvent(ctx, id, note, "应用自己调整了窗口尺寸，画面几何已更新", "", 0, true, m.NowOffset(id))
 	m.log.Info("窗口尺寸变化", "session", id,
 		"from", fmt.Sprintf("%dx%d", prev.Width, prev.Height),
 		"to", fmt.Sprintf("%dx%d", frame.Width, frame.Height))
 }
 
-// videoOffset 当前时刻在录像里的偏移量（毫秒）；录像还没开始或已收尾时返回 -1。
-func (m *Manager) videoOffset(id string) int64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	live, ok := m.live[id]
-	if !ok || live.recordingStartMs <= 0 {
-		return -1
-	}
-	offset := time.Now().UnixMilli() - live.recordingStartMs
-	if offset < 0 {
-		return 0
-	}
-	return offset
-}

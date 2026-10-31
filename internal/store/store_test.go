@@ -22,8 +22,7 @@ func sampleSession(id string) Session {
 	return Session{
 		ID:        id,
 		App:       "DashPlayer",
-		Ref:       "main",
-		CommitSHA: "9da4ce76",
+		Ref:       "9da4ce76",
 		Image:     "rigd-desktop:latest",
 		Status:    StatusStarting,
 		CDPPort:   9222,
@@ -45,7 +44,7 @@ func TestSessionRoundTrip(t *testing.T) {
 
 	sess.Status = StatusReady
 	sess.StartedAt = time.Now()
-	sess.VideoPath = "/tmp/rigd/s-1/video/session.mp4"
+	sess.VideoDurationMS = 42_000
 	if err := s.UpdateSession(ctx, sess); err != nil {
 		t.Fatalf("更新会话失败: %v", err)
 	}
@@ -57,8 +56,8 @@ func TestSessionRoundTrip(t *testing.T) {
 	if got.Status != StatusReady {
 		t.Fatalf("状态应为 ready，实际 %q", got.Status)
 	}
-	if got.VideoPath != sess.VideoPath {
-		t.Fatalf("录像路径未持久化: %q", got.VideoPath)
+	if got.VideoDurationMS != 42_000 {
+		t.Fatalf("录像时长未持久化: %d", got.VideoDurationMS)
 	}
 	if got.StartedAt.IsZero() {
 		t.Fatal("开始时间丢失")

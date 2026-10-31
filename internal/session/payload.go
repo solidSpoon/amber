@@ -106,8 +106,6 @@ type payloadInput struct {
 type assetMount struct {
 	Slot AssetSlot
 	Dir  string
-	Kind string
-	Key  string // manifest digest（用于引用计数）
 }
 
 // resolvePayload 校验来源、物化产物、读自述、确定入口。
@@ -200,37 +198,17 @@ func (m *Manager) materialize(manifest store.Manifest, dst string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("创建目录失败: %w", err)
 		}
-		if err := m.linkOrCopy(m.store.BlobPath(entry.Digest), target); err != nil {
-			return fmt.Errorf("铺开 %s 失败: %w", entry.Path, err)
-		}
+		// 可执行位要显式补上：blob 是按内容存的，里面没有"这个文件可执行"这回事
 		mode := os.FileMode(0o644)
 		if entry.Mode&0o111 != 0 {
 			mode = 0o755
 		}
+		if err := copyOrLink(m.store.BlobPath(entry.Digest), target, mode, false); err != nil {
+			return fmt.Errorf("铺开 %s 失败: %w", entry.Path, err)
+		}
 		_ = os.Chmod(target, mode)
 	}
 	return nil
-}
-
-func (m *Manager) linkOrCopy(src, dst string) error {
-	if err := os.Link(src, dst); err == nil {
-		return nil
-	}
-	// 跨文件系统（blob 在别的挂载点上）时退化成复制
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // readRecipe 读产物根目录的 rig.json；没有就是空自述（靠约定猜）。
@@ -350,7 +328,6 @@ func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []
 					return nil, err
 				}
 			}
-			mount.Kind = "dir"
 		case "manifest":
 			manifest, err := m.store.GetManifest(ctx, src.Digest)
 			if err != nil {
@@ -362,7 +339,6 @@ func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []
 					return nil, err
 				}
 			}
-			mount.Kind, mount.Key = "manifest", src.Digest
 		}
 		mounts = append(mounts, mount)
 	}
@@ -389,12 +365,11 @@ func decodeAssets(raw string) map[string]string {
 	return assets
 }
 
-// snapshotTree 把宿主目录硬链接复制到目标目录。
+// snapshotTree 把目录树定格到会话目录：默认硬链接（零拷贝），copyFiles=true 时真复制。
 //
 // 硬链接而不是真复制：1.3GB / 一万个文件的产物大约 1 秒、零额外磁盘，
 // 而且之后宿主上重新打包（写新文件或 rename 替换）不会透过链接影响这份快照。
 // 跨文件系统（builder 输出在另一个挂载点）时自动退化成复制。
-// snapshotTree 把目录树定格到会话目录：默认硬链接（零拷贝），copyFiles=true 时真复制。
 //
 // 什么时候必须复制：这个目录之后要挂成可写。硬链接的两个名字指向同一个 inode，
 // 容器里写文件就是写宿主上的原件——素材被改掉，下次验收的输入就不一样了。
@@ -433,50 +408,40 @@ func snapshotTree(src, dst string, copyFiles bool) error {
 			}
 			return os.Symlink(link, target)
 		default:
-			if copyFiles {
-				return copyFile(path, target, entryInfo.Mode())
-			}
-			return linkOrCopyFile(path, target, entryInfo.Mode())
+			return copyOrLink(path, target, entryInfo.Mode(), copyFiles)
 		}
 	})
 }
 
-// copyFile 真复制一份字节（可写素材用，不能和宿主共享 inode）。
-func copyFile(src, dst string, mode os.FileMode) error {
+// copyOrLink 把 src 的内容落到 dst。
+//
+// 默认硬链接：1.3GB / 一万个文件的产物是零拷贝、毫秒级。跨文件系统（blob 在别的挂载点、
+// builder 输出在另一个分区）时自动退化成复制。
+//
+// independent=true 表示"这两个文件必须各自独立"，也就是真复制：给可写挂载用的素材目录
+// 不能和宿主共享 inode，否则容器里写一次，宿主上的原件就没了。
+//
+// 落盘前先删 dst：它可能是上次留下的硬链接（和 src 同一个 inode），
+// 直接 O_TRUNC 打开会把 src 也清空。
+func copyOrLink(src, dst string, mode os.FileMode, independent bool) error {
 	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if !independent {
+		if err := os.Link(src, dst); err == nil {
+			return nil
+		}
 	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
-	if err != nil {
-		return err
+	perm := mode.Perm()
+	if perm == 0 {
+		perm = 0o644
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
-}
-
-// linkOrCopyFile 优先硬链接，失败（跨设备/权限）则复制。
-func linkOrCopyFile(src, dst string, mode os.FileMode) error {
-	if err := os.Link(src, dst); err == nil {
-		return nil
-	}
-	// 目标可能是上一次的硬链接（和 src 同一 inode），直接 O_TRUNC 会把 src 也清空
-	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}

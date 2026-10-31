@@ -142,10 +142,10 @@ func (s *Server) Handler() http.Handler {
 type sessionDTO struct {
 	ID string `json:"id"`
 	// Title 这次验收的意图（一句话），列表和记录顶部先展示它
-	Title        string `json:"title,omitempty"`
-	App          string `json:"app"`
+	Title string `json:"title,omitempty"`
+	App   string `json:"app"`
+	// Ref 来源版本号（commit / tag / build id），只用于溯源
 	Ref          string `json:"ref"`
-	CommitSHA    string `json:"commitSha"`
 	Status       string `json:"status"`
 	CDPPort      int    `json:"cdpPort"`
 	VNCPort      int    `json:"vncPort"`
@@ -195,7 +195,7 @@ func toGeometry(r store.Rect) *geometryDTO {
 
 func toSessionDTO(s store.Session) sessionDTO {
 	dto := sessionDTO{
-		ID: s.ID, Title: s.Title, App: s.App, Ref: s.Ref, CommitSHA: s.CommitSHA, Status: string(s.Status),
+		ID: s.ID, Title: s.Title, App: s.App, Ref: s.Ref, Status: string(s.Status),
 		CDPPort: s.CDPPort, VNCPort: s.VNCPort, VideoDurationMS: s.VideoDurationMS,
 		Verdict: s.Verdict, Summary: s.Summary, Error: s.Error,
 		Frame: toGeometry(s.Frame), Display: toGeometry(s.Display),
