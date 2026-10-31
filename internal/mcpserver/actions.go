@@ -275,8 +275,6 @@ func (s *Server) doAssert(ctx context.Context, a assertArgs) error {
 const (
 	maxActSteps = 50
 	actTimeout  = 2 * time.Minute
-	// 取结束画面之前留的固定余量：动作刚发出去，界面可能还在动画
-	settleDelay = 400 * time.Millisecond
 )
 
 // batchStep 批里的一步：动作名 + 该动作自己的参数。
@@ -284,7 +282,7 @@ const (
 // 故意做成扁平结构而不是嵌套 JSON：模型写错一层就整个批跑不了，
 // 扁平至少能一眼看出哪一项写错了。
 type batchStep struct {
-	Action string `json:"action" jsonschema:"动作：click/hover/fill/press/type/eval/wait/assert"`
+	Action string `json:"action" jsonschema:"动作：click/hover/fill/press/type/eval/wait/assert；最后一步必须是 wait_and_capture"`
 	stepArgs
 
 	Ref       string  `json:"ref,omitempty"`
@@ -378,6 +376,15 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 	if len(a.Steps) > maxActSteps {
 		return "", actResult{}, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxActSteps, len(a.Steps))
 	}
+	// 最后一步必须是收尾动作：等到界面稳定再把画面交回来。
+	// 不这样要求的话，模型会拿"动作刚发出去"的中间状态当结果，验收结论就不可信了。
+	last := a.Steps[len(a.Steps)-1]
+	if last.Action != "wait_and_capture" {
+		return "", actResult{}, errors.New(
+			"steps 的最后一步必须是 wait_and_capture（参数 for、timeoutMs）：" +
+				"它是这一批的收尾——等到界面稳定，再把画面和可操作元素带回来")
+	}
+	body := a.Steps[:len(a.Steps)-1]
 
 	ctx, cancel := context.WithTimeout(ctx, actTimeout)
 	defer cancel()
@@ -390,18 +397,19 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 	}
 
 	var b strings.Builder
-	res := actResult{Steps: make([]actStepResult, 0, len(a.Steps))}
-	for i, st := range a.Steps {
+	res := actResult{Steps: make([]actStepResult, 0, len(body))}
+	for i, st := range body {
 		msg, extra, err := s.actStep(ctx, a.SessionID, st)
 		if err != nil {
 			fmt.Fprintf(&b, "%d. %s ✗ %v\n", i+1, st.Action, err)
-			fmt.Fprintf(&b, "已停止：后面 %d 步没有执行。", len(a.Steps)-i-1)
+			fmt.Fprintf(&b, "已停止：后面 %d 步没有执行。", len(body)-i-1)
 			res.Steps = append(res.Steps, actStepResult{
 				Index: i + 1, Action: st.Action, OK: false, Text: err.Error(), Elements: extra.Elements, Value: extra.Value,
 			})
 			res.StoppedAt = i + 1
 			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
-			s.attachCurrent(ctx, a.SessionID, a.Steps, &b, &res)
+			res.OK = false
+			s.captureAfter(ctx, a.SessionID, last, &b, &res)
 			return b.String(), res, nil
 		}
 		fmt.Fprintf(&b, "%d. %s ✓ %s\n", i+1, st.Action, msg)
@@ -414,32 +422,46 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 			Index: i + 1, Action: st.Action, OK: true, Text: msg, Elements: extra.Elements, Value: extra.Value, Image: extra.Image,
 		})
 	}
-	if len(a.Steps) == 1 {
-		fmt.Fprintf(&b, "完成。")
-	} else {
-		fmt.Fprintf(&b, "全部 %d 步执行完成。", len(a.Steps))
-	}
+	fmt.Fprintf(&b, "全部 %d 步执行完成。", len(body))
 	res.OK = true
 	s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
-	// 取画面之前留一点余量：动作刚发出去，界面可能还在动画。
-	// 要等更久就显式用一步 wait 收尾——那是调用方的事，这里不设第二个旋钮。
-	select {
-	case <-ctx.Done():
-	case <-time.After(settleDelay):
-	}
-	s.attachCurrent(ctx, a.SessionID, a.Steps, &b, &res)
+	s.captureAfter(ctx, a.SessionID, last, &b, &res)
 	return b.String(), res, nil
 }
 
-// attachCurrent 跑完一批后，自动附上"现在界面长什么样"。
+// captureAfter 执行收尾动作 wait_and_capture：等到条件成立，再把界面带回来。
 //
-// 不做的话，模型跑完一批还得再调一次 snapshot 才知道结果——又是一次往返，
-// 正好把批的意义抵消掉。这里不记步骤：它不是这次操作的一部分，是把结果给模型看。
-func (s *Server) attachCurrent(ctx context.Context, sid string, steps []batchStep, b *strings.Builder, res *actResult) {
+// 等不到也照样把画面带回来——报告里能看到"这时候还没稳定"，比什么都不给强。
+func (s *Server) captureAfter(ctx context.Context, sid string, step batchStep, b *strings.Builder, res *actResult) {
 	insp, err := s.manager.Inspector(ctx, sid)
 	if err != nil {
 		return
 	}
+	cond := strings.TrimSpace(step.For)
+	timeout := time.Duration(step.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	started := time.Now()
+	settled := false
+	if cond != "" {
+		for {
+			raw, evalErr := insp.Evaluate(ctx, "Boolean("+cond+")")
+			if evalErr == nil && strings.TrimSpace(string(raw)) == "true" {
+				settled = true
+				break
+			}
+			if time.Since(started) >= timeout {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+
 	snap, err := insp.Snapshot(ctx)
 	if err != nil {
 		return
@@ -452,8 +474,12 @@ func (s *Server) attachCurrent(ctx context.Context, sid string, steps []batchSte
 			res.After = raw
 		}
 	}
-	if !res.OK {
-		fmt.Fprintf(b, "\n停在这里的界面：%d 个可操作元素（见下图）", len(snap.Elements))
+	switch {
+	case cond == "":
+	case settled:
+		fmt.Fprintf(b, "\n界面已稳定（等了 %.1f 秒），画面见下。", time.Since(started).Seconds())
+	default:
+		fmt.Fprintf(b, "\n没等到「%s」成立（等了 %.1f 秒），这是当时的画面。", cond, time.Since(started).Seconds())
 	}
 }
 

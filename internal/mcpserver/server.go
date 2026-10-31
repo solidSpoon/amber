@@ -216,13 +216,13 @@ func registerActTool(server *mcp.Server, s *Server) {
 		Name: "run",
 		Description: "执行一串动作（steps 数组，1~50 步），并返回执行完之后的快照；只做一件事就传一个只含一个元素的数组。" +
 			"返回三样东西：每一步的结果、执行完之后的快照（一帧画面 + 可操作元素表）、以及停在第几步（失败时）。" +
+			"最后一步必须是 wait_and_capture：等到界面稳定再把画面带回来，别拿动画中间帧当结果。" +
 			"这一串中间不回到你这边，所以有时效性要求的连招靠它：拖到第 6 秒立刻悬停/断言，不会隔着你思考的那几十秒。" +
 			"动作：click 点元素（ref 或 match 文字或 selector）/ " +
 			"hover 把鼠标停在元素上（悬停才出现的浮层，如词典）/ fill 覆盖填写输入框 / " +
 			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立 / assert 记一条断言。" +
 			"press 和 type 走真实键盘输入，页面和原生对话框都收得到。" +
-			"建议最后一步用 wait 收尾：界面要加载、要动画的时候，动作刚发出去界面还没稳定，" +
-			"这时立刻返回的画面会是中间状态，读者看到的就不是这一步的结果。" +
+			"wait_and_capture 的参数是 for（等到成立的 JS 条件）和 timeoutMs；等不到也会把当时的画面带回来。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
 			"每一步都会在验收报告里各记一条，当作独立的一步来读。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args actArgs) (*mcp.CallToolResult, actResult, error) {
