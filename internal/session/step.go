@@ -211,11 +211,11 @@ func truncateString(s string, limit int) string {
 
 // HasVisual 这一步值不值得配一张画面。
 //
-// 「读页面结构」「读页面上的值」这类动作不改界面：拍下来是一张和上一步一样的截图，
-// 白占地方，也白花一次抓图的时间。报告里它就该只有文字。
+// snapshot 要留图：它就是"看一眼当前界面"，报告里那一眼本身就是证据。
+// eval / wait 只取值、只等条件，拍下来和上一步一样，白占地方。
 func HasVisual(tool string) bool {
 	switch tool {
-	case "snapshot", "eval", "wait":
+	case "eval", "wait":
 		return false
 	default:
 		return true

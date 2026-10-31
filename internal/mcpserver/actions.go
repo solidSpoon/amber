@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,39 +49,14 @@ func (s *Server) doSnapshot(ctx context.Context, a sessionArgs) (inspect.Snapsho
 	return snap, shot, nil
 }
 
-// doScreenshot 截一张证据图，返回相对路径与字节数。
-func (s *Server) doScreenshot(ctx context.Context, a screenshotArgs) (string, int64, error) {
-	rel := filepath.Join("screenshots", fmt.Sprintf("%s-%s.png", time.Now().Format("150405"), sanitizeLabel(a.Label)))
-	var size int64
-	_, artifact, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "screenshot", Args: map[string]any{"label": a.Label}, Intent: a.Intent, Expect: a.Expect,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
-		dir, err := s.sessionDir(ctx, a.SessionID)
-		if err != nil {
-			return "", "", err
-		}
-		n, err := insp.Screenshot(ctx, filepath.Join(dir, rel))
-		if err != nil {
-			return "", "", err
-		}
-		size = n
-		// 报告里只写"截了什么"，不写落在哪个文件——路径对读者没用。
-		return fmt.Sprintf("已截图：%s", a.Label), rel, nil
-	})
-	if err != nil {
-		return "", 0, err
-	}
-	return artifact, size, nil
-}
-
-// locator 能"现找元素"的检查器（假实现不实现，按能力探测）。
+// locator 能"现找元素"的检查器（测试里的假实现不实现，按能力探测）。
 type locator interface {
 	Locate(ctx context.Context, match, selector string) (string, error)
 }
 
 // resolveRef 把「引用号 / 可见文字 / CSS 选择器」统一成一个引用号。
 //
-// 批里必须支持后两种：引用号是某次 snapshot 的产物，页面一翻页就作废，
+// 批里必须支持后两种：引用号是某次 snapshot 的产物，页面一变就作废，
 // 而连招里要点的按钮往往在这一步才出现。
 func (s *Server) resolveRef(ctx context.Context, sid, ref, match, selector string) (string, error) {
 	if ref != "" || (match == "" && selector == "") {
@@ -170,31 +144,50 @@ func (s *Server) doFill(ctx context.Context, a fillArgs) (string, error) {
 	}
 	a.Ref = ref
 	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "fill", Args: map[string]any{"ref": a.Ref, "text": a.Text, "submit": a.Submit},
+		Tool: "fill", Args: map[string]any{"ref": a.Ref, "text": a.Text},
 		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
 		if err := insp.Fill(ctx, a.Ref, a.Text); err != nil {
 			return "", "", err
-		}
-		if a.Submit {
-			if err := insp.Press(ctx, "Enter"); err != nil {
-				return "", "", err
-			}
 		}
 		return fmt.Sprintf("已填入 %q", a.Text), "", nil
 	})
 	return msg, err
 }
 
-// doPress 给当前焦点发一次按键。
+// doPress 给当前焦点发一次按键（组合键也行，如 ctrl+l）。
+//
+// 走系统层而不是页面的键盘事件：真实按键页面和原生对话框都收得到，
+// 一套动作覆盖两种情况，AI 不用判断"该用哪个按键动作"。
 func (s *Server) doPress(ctx context.Context, a pressArgs) (string, error) {
+	if strings.TrimSpace(a.Key) == "" {
+		return "", errors.New("press 需要 key（如 Enter、ArrowRight、ctrl+l）")
+	}
 	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "press_key", Args: map[string]any{"key": a.Key}, Intent: a.Intent, Expect: a.Expect,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
-		if err := insp.Press(ctx, a.Key); err != nil {
+		Tool: "press", Args: map[string]any{"key": a.Key}, Intent: a.Intent, Expect: a.Expect,
+		Caption: "按下 " + a.Key,
+	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
+		if err := s.manager.DesktopKey(ctx, a.SessionID, a.Key); err != nil {
 			return "", "", err
 		}
-		return "已按键 " + a.Key, "", nil
+		return "已按下 " + a.Key, "", nil
+	})
+	return msg, err
+}
+
+// doTypeText 往当前焦点敲一段字（原生对话框里输路径用它）。
+func (s *Server) doTypeText(ctx context.Context, a pressArgs) (string, error) {
+	if a.Key == "" {
+		return "", errors.New("type 需要 text")
+	}
+	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+		Tool: "type", Args: map[string]any{"text": a.Key}, Intent: a.Intent, Expect: a.Expect,
+		Caption: "输入「" + a.Key + "」",
+	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
+		if err := s.manager.DesktopType(ctx, a.SessionID, a.Key); err != nil {
+			return "", "", err
+		}
+		return "已输入 " + a.Key, "", nil
 	})
 	return msg, err
 }
@@ -289,7 +282,7 @@ const (
 // 故意做成扁平结构而不是嵌套 JSON：模型写错一层就整个批跑不了，
 // 扁平至少能一眼看出哪一项写错了。
 type batchStep struct {
-	Action string `json:"action" jsonschema:"动作：snapshot/click/fill/press_key/eval/wait/screenshot/assert/desktop"`
+	Action string `json:"action" jsonschema:"动作：snapshot/click/hover/fill/press/type/eval/wait/assert"`
 	stepArgs
 
 	Ref       string  `json:"ref,omitempty"`
@@ -298,7 +291,6 @@ type batchStep struct {
 	X         float64 `json:"x,omitempty"`
 	Y         float64 `json:"y,omitempty"`
 	Text      string  `json:"text,omitempty"`
-	Submit    bool    `json:"submit,omitempty"`
 	Key       string  `json:"key,omitempty"`
 	Script    string  `json:"script,omitempty"`
 	For       string  `json:"for,omitempty"`
@@ -322,8 +314,16 @@ type stepExtra struct {
 }
 
 // runStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
+//
+// 动作表刻意正交：一个动作只管一件事，AI 不需要在"该用哪个"上纠结。
+//
+//	snapshot 看状态 / click 点 / hover 悬停 / fill 填输入框
+//	press 按键 / type 打字（这两个作用于当前焦点，页面内外通用）
+//	eval 求值 / wait 等条件 / assert 下结论
 func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
 	base := stepArgs{Intent: st.Intent, Expect: st.Expect}
+	point := clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y}
+
 	switch st.Action {
 	case "snapshot":
 		snap, shot, err := s.doSnapshot(ctx, sessionArgs{SessionID: sid, stepArgs: base})
@@ -334,16 +334,19 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 			Text: inspect.Summarize(snap), Elements: snap.Elements, Image: shot,
 		}, nil
 	case "click":
-		msg, err := s.doClick(ctx, clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y})
+		msg, err := s.doClick(ctx, point)
 		return msg, stepExtra{}, err
 	case "hover":
-		msg, err := s.doHover(ctx, clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y})
+		msg, err := s.doHover(ctx, point)
 		return msg, stepExtra{}, err
 	case "fill":
-		msg, err := s.doFill(ctx, fillArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, Text: st.Text, Submit: st.Submit})
+		msg, err := s.doFill(ctx, fillArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, Text: st.Text})
 		return msg, stepExtra{}, err
-	case "press_key":
+	case "press":
 		msg, err := s.doPress(ctx, pressArgs{SessionID: sid, stepArgs: base, Key: st.Key})
+		return msg, stepExtra{}, err
+	case "type":
+		msg, err := s.doTypeText(ctx, pressArgs{SessionID: sid, stepArgs: base, Key: st.Text})
 		return msg, stepExtra{}, err
 	case "eval":
 		pretty, val, err := s.doEval(ctx, evalArgs{SessionID: sid, stepArgs: base, Script: st.Script})
@@ -353,49 +356,6 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 		return pretty, stepExtra{Value: val}, nil
 	case "wait":
 		msg, err := s.doWait(ctx, waitArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
-		return msg, stepExtra{}, err
-	case "screenshot":
-		path, size, err := s.doScreenshot(ctx, screenshotArgs{SessionID: sid, stepArgs: base, Label: st.Label})
-		if err != nil {
-			return "", stepExtra{}, err
-		}
-		return fmt.Sprintf("已截图：%s（%d 字节）", st.Label, size), stepExtra{Value: path}, nil
-	case "desktop":
-		// 原生对话框、系统菜单这类 CDP 够不到的地方
-		if st.Op == "" {
-			return "", stepExtra{}, errors.New("desktop 需要 op（key/type/move）")
-		}
-		if st.Op != "move" && st.Value == "" {
-			return "", stepExtra{}, errors.New("desktop 的 key/type 需要 value")
-		}
-		caption := "按下 " + st.Value
-		if st.Op == "type" {
-			caption = "输入「" + st.Value + "」"
-		}
-		msg, _, err := s.manager.Record(ctx, sid, session.Step{
-			Tool: "desktop", Args: map[string]any{"op": st.Op, "value": st.Value},
-			Intent: base.Intent, Expect: base.Expect, Caption: caption,
-		}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
-			switch st.Op {
-			case "move":
-				if err := s.manager.DesktopMove(ctx, sid, int(st.X), int(st.Y)); err != nil {
-					return "", "", err
-				}
-				return fmt.Sprintf("已把鼠标移到屏幕坐标 (%.0f, %.0f)", st.X, st.Y), "", nil
-			case "key":
-				if err := s.manager.DesktopKey(ctx, sid, st.Value); err != nil {
-					return "", "", err
-				}
-				return "已按下 " + st.Value, "", nil
-			case "type":
-				if err := s.manager.DesktopType(ctx, sid, st.Value); err != nil {
-					return "", "", err
-				}
-				return "已输入 " + st.Value, "", nil
-			default:
-				return "", "", fmt.Errorf("desktop 的 op 只支持 key / type（收到 %q）", st.Op)
-			}
-		})
 		return msg, stepExtra{}, err
 	case "assert":
 		if st.OK == nil {
@@ -409,7 +369,7 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 		}
 		return "断言已记录 ❌：" + st.Claim, stepExtra{}, nil
 	default:
-		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：snapshot/click/fill/press_key/eval/wait/screenshot/assert）", st.Action)
+		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：snapshot/click/hover/fill/press/type/eval/wait/assert）", st.Action)
 	}
 }
 

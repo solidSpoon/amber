@@ -194,11 +194,11 @@ func registerRunTool(server *mcp.Server, s *Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "run",
 		Description: "按顺序执行一串动作（steps 数组，1~50 步），中间不回到你这边；只做一件事就传一个只含一个元素的数组。" +
-			"动作：snapshot 读页面结构 / click 点元素（ref 或 match 文字或 selector）/ fill 填文本 / " +
-			"hover 把鼠标移到元素上（悬停才出现的提示/词典浮层用它）/ " +
-			"press_key 按键 / eval 在页面求值 / wait 等条件成立 / screenshot 截图留证 / assert 记一条断言 / " +
-			"desktop 系统级键盘输入（op=key|type，用于原生文件对话框这类页面外的地方）。" +
-			"时效性靠它保证：拖动到 6 秒后立刻截图，两步之间不会隔着你思考的那几十秒。" +
+			"动作：snapshot 看当前界面（元素树 + 一张画面）/ click 点元素（ref 或 match 文字或 selector）/ " +
+			"hover 把鼠标停在元素上（悬停才出现的浮层，如词典）/ fill 覆盖填写输入框 / " +
+			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立 / assert 记一条断言。" +
+			"press 和 type 走真实键盘输入，页面和原生对话框都收得到。" +
+			"时效性靠它保证：拖到第 6 秒立刻截一张，两步之间不会隔着你思考的那几十秒。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
 			"每一步都会在验收报告里各记一条，当作独立的一步来读。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args runArgs) (*mcp.CallToolResult, runResult, error) {
@@ -272,17 +272,6 @@ type feedbackArgs struct {
 	Text      string `json:"text" jsonschema:"具体建议：哪里别扭、缺什么、希望怎么改"`
 }
 
-type screenshotArgs struct {
-	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
-	stepArgs
-	Label string `json:"label" jsonschema:"本次截图的用途"`
-}
-
-type screenshotResult struct {
-	Path  string `json:"path"`
-	Bytes int64  `json:"bytes"`
-}
-
 type clickArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
 	stepArgs
@@ -300,7 +289,6 @@ type fillArgs struct {
 	Match    string `json:"match,omitempty" jsonschema:"按可见文字找输入框"`
 	Selector string `json:"selector,omitempty" jsonschema:"按 CSS 选择器找输入框"`
 	Text     string `json:"text" jsonschema:"要输入的文字"`
-	Submit   bool   `json:"submit,omitempty" jsonschema:"是否回车提交"`
 }
 
 type pressArgs struct {
