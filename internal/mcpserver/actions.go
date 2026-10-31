@@ -135,9 +135,6 @@ func (s *Server) resolveRef(ctx context.Context, sid, ref, match, selector strin
 
 // doClick 点一个元素（引用号优先，可用可见文字/选择器，坐标兜底）。
 func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
-	if a.Ref == "" && a.Match == "" && a.Selector == "" && a.X == 0 && a.Y == 0 {
-		return "", errors.New("ref、match/selector、x/y 至少要给一个")
-	}
 	ref, err := s.resolveRef(ctx, a.SessionID, a.Ref, a.Match, a.Selector)
 	if err != nil {
 		return "", err
@@ -167,9 +164,6 @@ func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
 
 // doHover 把鼠标移到元素上：悬停才出现的浮层（词典释义）用它。
 func (s *Server) doHover(ctx context.Context, a clickArgs) (string, error) {
-	if a.Ref == "" && a.Match == "" && a.Selector == "" && a.X == 0 && a.Y == 0 {
-		return "", errors.New("hover 需要 ref、match/selector 或 x/y")
-	}
 	ref, err := s.resolveRef(ctx, a.SessionID, a.Ref, a.Match, a.Selector)
 	if err != nil {
 		return "", err
@@ -220,9 +214,6 @@ func (s *Server) doFill(ctx context.Context, a fillArgs) (string, error) {
 // 走系统层而不是页面的键盘事件：真实按键页面和原生对话框都收得到，
 // 一套动作覆盖两种情况，AI 不用判断"该用哪个按键动作"。
 func (s *Server) doPress(ctx context.Context, a pressArgs) (string, error) {
-	if strings.TrimSpace(a.Key) == "" {
-		return "", errors.New("press 需要 key（如 Enter、ArrowRight、ctrl+l）")
-	}
 	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "press", Args: map[string]any{"key": a.Key}, Intent: a.Intent, Expect: a.Expect,
 		Caption: "按下 " + a.Key,
@@ -236,18 +227,15 @@ func (s *Server) doPress(ctx context.Context, a pressArgs) (string, error) {
 }
 
 // doTypeText 往当前焦点敲一段字（原生对话框里输路径用它）。
-func (s *Server) doTypeText(ctx context.Context, a pressArgs) (string, error) {
-	if a.Key == "" {
-		return "", errors.New("type 需要 text")
-	}
+func (s *Server) doTypeText(ctx context.Context, a typeArgs) (string, error) {
 	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "type", Args: map[string]any{"text": a.Key}, Intent: a.Intent, Expect: a.Expect,
-		Caption: "输入「" + a.Key + "」",
+		Tool: "type", Args: map[string]any{"text": a.Text}, Intent: a.Intent, Expect: a.Expect,
+		Caption: "输入「" + a.Text + "」",
 	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
-		if err := s.manager.DesktopType(ctx, a.SessionID, a.Key); err != nil {
+		if err := s.manager.DesktopType(ctx, a.SessionID, a.Text); err != nil {
 			return "", "", err
 		}
-		return "已输入 " + a.Key, "", nil
+		return "已输入 " + a.Text, "", nil
 	})
 	return msg, err
 }
@@ -283,9 +271,6 @@ func (s *Server) doEval(ctx context.Context, a evalArgs) (string, any, error) {
 // 两者不接受对方的参数，写混了直接报错——省得调用方拿 for:"true" 假装睡眠。
 func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 	expr := strings.TrimSpace(a.For)
-	if expr == "" {
-		return "", errors.New("wait 需要 for（等它成立的 JS 条件）；只想等一段时间请改用 sleep")
-	}
 	timeout := time.Duration(a.TimeoutMS) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -294,19 +279,16 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 		timeout = time.Minute
 	}
 
-	var waited time.Duration
 	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "wait", Args: map[string]any{"for": expr, "timeoutMs": timeout.Milliseconds()},
 		Intent: a.Intent, Expect: a.Expect,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
 		elapsed, werr := waitForCondition(ctx, insp, expr, a.TimeoutMS, 5000)
-		waited = elapsed
 		if werr != nil {
 			return "", "", werr
 		}
 		return fmt.Sprintf("条件成立（等了 %.1f 秒）", elapsed.Seconds()), "", nil
 	})
-	_ = waited
 	return msg, err
 }
 
@@ -315,12 +297,6 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 // 它不是"没写好的 wait"：动画、限流、防抖这些场景就是需要一段确定的时长，
 // 而且它不该因为"条件没成立"而失败。要等条件成立用 wait。
 func (s *Server) doSleep(ctx context.Context, a sleepArgs) (string, error) {
-	if a.MS <= 0 {
-		return "", errors.New("sleep 需要 ms（要等多少毫秒，1~60000）；等条件成立请改用 wait")
-	}
-	if a.MS > 60000 {
-		return "", fmt.Errorf("sleep 最多 60000 毫秒（收到 %d）", a.MS)
-	}
 	waited := time.Duration(a.MS) * time.Millisecond
 	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "sleep", Args: map[string]any{"ms": a.MS}, Intent: a.Intent, Expect: a.Expect,
@@ -339,6 +315,8 @@ func (s *Server) doSleep(ctx context.Context, a sleepArgs) (string, error) {
 
 const (
 	maxActSteps = 50
+	// maxSleepMS 一次 sleep 的上限：再长就该交给 wait 等条件，而不是干等
+	maxSleepMS = 60000
 	// defaultCaptureWait capture 没写 timeoutMs 时的等待上限
 	defaultCaptureWait = 3000
 )
@@ -375,23 +353,204 @@ type stepExtra struct {
 	Image []byte
 }
 
-// actionTable 是动作的唯一清单：schema 的 enum、说明文字、自检都从这里来。
+// ---- 动作表 ---------------------------------------------------------------
+
+// actionSpec 一个动作的全部定义。会漂的三处都由它长出来：
+// JSON Schema 的 enum、run 工具说明里的对照表、执行前的字段自检。
 //
-// 放在一处的原因很实际：这三个地方只要各写一份，就一定会漂（描述里有 assert、
-// 代码里没有分支，就是这么来的）。
-var actionTable = []struct {
+// 分三处各写一份的代价是真实的：描述里写着一个动作、代码里没有分支，
+// 调用方拿到一句"未知动作"，却看不出是文档错了还是参数错了。
+type actionSpec struct {
+	// Name 对外宣传的动作名（已归一，别名不在这里）
 	Name string
+	// Need 必填字段，用人话写：既是工具说明的一列，也是自检报错的开头
 	Need string
-}{
-	{"click", "ref 或 match 或 selector 或 x+y"},
-	{"hover", "ref 或 match 或 selector 或 x+y"},
-	{"fill", "ref/match/selector + text"},
-	{"press", "key"},
-	{"type", "text"},
-	{"eval", "script"},
-	{"wait", "for（等条件成立；只想等时间用 sleep）"},
-	{"sleep", "ms（等固定时长；等条件成立用 wait）"},
-	{"capture", "可选 for + timeoutMs"},
+	// Note 这个动作是干什么的（工具说明里跟在字段后面的一句话）
+	Note string
+	// Check 执行前核对字段和动作对不对得上；nil 表示没有额外要求
+	Check func(batchStep) error
+	// Run 真正执行一步：返回给模型看的一句话 + 额外载荷
+	Run func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error)
+}
+
+// needPoint 是"点哪个元素"的四种写法，click 和 hover 共用。
+const needPoint = "ref 或 match 或 selector 或 x+y"
+
+// hasPoint 判断这一组参数有没有指定目标元素。
+func hasPoint(st batchStep) bool {
+	return st.Ref != "" || st.Match != "" || st.Selector != "" || (st.X != 0 && st.Y != 0)
+}
+
+// actionTable 是动作的唯一清单：枚举、说明、自检、执行体都在这里。
+var actionTable = []actionSpec{
+	{
+		Name: "click", Need: needPoint,
+		Note: "点元素",
+		Check: func(st batchStep) error {
+			if hasPoint(st) {
+				return nil
+			}
+			return fmt.Errorf("click 需要 %s 之一", needPoint)
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			msg, err := s.doClick(ctx, clickArgs{
+				SessionID: sid, stepArgs: base,
+				Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y,
+			})
+			return msg, stepExtra{}, err
+		},
+	},
+	{
+		Name: "hover", Need: needPoint,
+		Note: "把鼠标停在元素上（悬停才出现的浮层，如词典）",
+		Check: func(st batchStep) error {
+			if hasPoint(st) {
+				return nil
+			}
+			return fmt.Errorf("hover 需要 %s 之一", needPoint)
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			msg, err := s.doHover(ctx, clickArgs{
+				SessionID: sid, stepArgs: base,
+				Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y,
+			})
+			return msg, stepExtra{}, err
+		},
+	},
+	{
+		Name: "fill", Need: "ref/match/selector + text",
+		Note: "覆盖填写输入框",
+		Check: func(st batchStep) error {
+			if st.Ref == "" && st.Match == "" && st.Selector == "" {
+				return errors.New("fill 需要 ref、match/selector 之一")
+			}
+			if st.Text == "" {
+				return errors.New("fill 需要 text（要填入的内容）")
+			}
+			return nil
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			msg, err := s.doFill(ctx, fillArgs{
+				SessionID: sid, stepArgs: base,
+				Ref: st.Ref, Match: st.Match, Selector: st.Selector, Text: st.Text,
+			})
+			return msg, stepExtra{}, err
+		},
+	},
+	{
+		Name: "press", Need: "key",
+		Note: "按键，组合键写成 ctrl+l；页面和原生对话框都收得到",
+		Check: func(st batchStep) error {
+			if strings.TrimSpace(st.Key) == "" {
+				return errors.New("press 需要 key（如 Enter、ArrowRight、ctrl+l）")
+			}
+			return nil
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			msg, err := s.doPress(ctx, pressArgs{SessionID: sid, stepArgs: base, Key: st.Key})
+			return msg, stepExtra{}, err
+		},
+	},
+	{
+		Name: "type", Need: "text",
+		Note: "往当前焦点打字",
+		Check: func(st batchStep) error {
+			if st.Text == "" {
+				return errors.New("type 需要 text（要输入的文字）")
+			}
+			return nil
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			msg, err := s.doTypeText(ctx, typeArgs{SessionID: sid, stepArgs: base, Text: st.Text})
+			return msg, stepExtra{}, err
+		},
+	},
+	{
+		Name: "eval", Need: "script",
+		Note: "在页面里求值，返回值原样给你",
+		Check: func(st batchStep) error {
+			if strings.TrimSpace(st.Script) == "" {
+				return errors.New("eval 需要 script（在页面里求值的 JS 表达式）")
+			}
+			return nil
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			pretty, val, err := s.doEval(ctx, evalArgs{SessionID: sid, stepArgs: base, Script: st.Script})
+			if err != nil {
+				return "", stepExtra{}, err
+			}
+			return pretty, stepExtra{Value: val}, nil
+		},
+	},
+	{
+		// wait 和 sleep 各自拒绝对方的字段：写混了当场说清楚，
+		// 省得调用方拿 for:"true" 假装睡眠。
+		Name: "wait", Need: "for（等条件成立；只想等时间用 sleep）",
+		Note: "等条件成立，等不到算这一步失败",
+		Check: func(st batchStep) error {
+			if strings.TrimSpace(st.For) == "" {
+				return errors.New("wait 需要 for（等它成立的 JS 条件）；只想等一段时间请改用 sleep")
+			}
+			if st.MS != 0 {
+				return errors.New("wait 不接受 ms：要等固定时长请用 sleep")
+			}
+			return nil
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			msg, err := s.doWait(ctx, waitArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
+			return msg, stepExtra{}, err
+		},
+	},
+	{
+		Name: "sleep", Need: "ms（等固定时长；等条件成立用 wait）",
+		Note: "等固定时长，不会失败",
+		Check: func(st batchStep) error {
+			if st.MS <= 0 {
+				return errors.New("sleep 需要 ms（要等多少毫秒）；等条件成立请用 wait")
+			}
+			if st.For != "" {
+				return errors.New("sleep 不接受 for：要等条件成立请用 wait")
+			}
+			if st.MS > maxSleepMS {
+				return fmt.Errorf("sleep 最多 %d 毫秒（收到 %d）", maxSleepMS, st.MS)
+			}
+			return nil
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			msg, err := s.doSleep(ctx, sleepArgs{SessionID: sid, stepArgs: base, MS: st.MS})
+			return msg, stepExtra{}, err
+		},
+	},
+	{
+		Name: "capture", Need: "可选 for + timeoutMs",
+		Note: "看一眼并留证，必须是最后一步",
+		Check: func(st batchStep) error {
+			if st.MS != 0 {
+				return errors.New("capture 不接受 ms：它等的是 for 条件；单纯等待请用 sleep")
+			}
+			return nil
+		},
+		Run: func(ctx context.Context, s *Server, sid string, base stepArgs, st batchStep) (string, stepExtra, error) {
+			snap, text, shot, err := s.doCapture(ctx, captureArgs{
+				SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS,
+			})
+			if err != nil {
+				return "", stepExtra{}, err
+			}
+			return fmt.Sprintf("界面：%s（%d 个可操作元素）", snap.Title, len(snap.Elements)),
+				stepExtra{Text: text, Elements: snap.Elements, Image: shot}, nil
+		},
+	},
+}
+
+// lookupAction 按名字取动作定义。
+func lookupAction(name string) (actionSpec, bool) {
+	for _, spec := range actionTable {
+		if spec.Name == name {
+			return spec, true
+		}
+	}
+	return actionSpec{}, false
 }
 
 // actionNames 给 JSON Schema 的 enum 用。
@@ -403,13 +562,22 @@ func actionNames() []any {
 	return names
 }
 
-// actionHelp 拼一句「可用动作」的说明，错误信息里也用它。
+// actionHelp 拼一句「可用动作」，错误信息和 schema 说明都用它。
 func actionHelp() string {
 	parts := make([]string, 0, len(actionTable))
 	for _, a := range actionTable {
 		parts = append(parts, a.Name+"（"+a.Need+"）")
 	}
 	return strings.Join(parts, " / ")
+}
+
+// actionLines 是工具说明里的动作对照表，一行一个动作（与 schema 同一个来源）。
+func actionLines() string {
+	var b strings.Builder
+	for _, a := range actionTable {
+		fmt.Fprintf(&b, "  %-8s%s —— %s\n", a.Name, a.Need, a.Note)
+	}
+	return b.String()
 }
 
 // normalizeAction 把历史名字收进来：同一个动作只对外宣传一个名字。
@@ -429,56 +597,14 @@ func normalizeAction(name string) string {
 // 为什么不在 schema 里做条件校验：JSON Schema 表达"click 要 ref 或坐标"要么写
 // 一大堆 oneOf，要么做不到；而错误信息本来就需要一句人话，索性在这里一次说完。
 func validateStep(st batchStep) error {
-	point := st.Ref != "" || st.Match != "" || st.Selector != "" || (st.X != 0 && st.Y != 0)
-	switch st.Action {
-	case "click", "hover":
-		if !point {
-			return fmt.Errorf("%s 需要 ref、match/selector 或 x+y 之一", st.Action)
-		}
-	case "fill":
-		if !point {
-			return errors.New("fill 需要 ref、match/selector 之一")
-		}
-		if st.Text == "" {
-			return errors.New("fill 需要 text（要填入的内容）")
-		}
-	case "press":
-		if strings.TrimSpace(st.Key) == "" {
-			return errors.New("press 需要 key（如 Enter、ArrowRight、ctrl+l）")
-		}
-	case "type":
-		if st.Text == "" {
-			return errors.New("type 需要 text（要输入的文字）")
-		}
-	case "eval":
-		if strings.TrimSpace(st.Script) == "" {
-			return errors.New("eval 需要 script（在页面里求值的 JS 表达式）")
-		}
-	case "wait":
-		if strings.TrimSpace(st.For) == "" {
-			return errors.New("wait 需要 for（等它成立的 JS 条件）；只想等一段时间请改用 sleep")
-		}
-		if st.MS != 0 {
-			return errors.New("wait 不接受 ms：要等固定时长请用 sleep")
-		}
-	case "sleep":
-		if st.MS <= 0 {
-			return errors.New("sleep 需要 ms（要等多少毫秒）；等条件成立请用 wait")
-		}
-		if st.For != "" {
-			return errors.New("sleep 不接受 for：要等条件成立请用 wait")
-		}
-		if st.MS > 60000 {
-			return fmt.Errorf("sleep 最多 60000 毫秒（收到 %d）", st.MS)
-		}
-	case "capture":
-		if st.MS != 0 {
-			return errors.New("capture 不接受 ms：它等的是 for 条件；单纯等待请用 sleep")
-		}
-	default:
+	spec, ok := lookupAction(st.Action)
+	if !ok {
 		return fmt.Errorf("未知动作 %q；可用动作：%s", st.Action, actionHelp())
 	}
-	return nil
+	if spec.Check == nil {
+		return nil
+	}
+	return spec.Check(st)
 }
 
 // actStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
@@ -489,47 +615,11 @@ func validateStep(st batchStep) error {
 //	press 按键 / type 打字（这两个作用于当前焦点，页面内外通用）
 //	eval 求值 / wait 等条件 / sleep 等时间
 func (s *Server) actStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
-	base := stepArgs{Intent: st.Intent, Expect: st.Expect}
-	point := clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y}
-
-	switch st.Action {
-	case "click":
-		msg, err := s.doClick(ctx, point)
-		return msg, stepExtra{}, err
-	case "hover":
-		msg, err := s.doHover(ctx, point)
-		return msg, stepExtra{}, err
-	case "fill":
-		msg, err := s.doFill(ctx, fillArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, Text: st.Text})
-		return msg, stepExtra{}, err
-	case "press":
-		msg, err := s.doPress(ctx, pressArgs{SessionID: sid, stepArgs: base, Key: st.Key})
-		return msg, stepExtra{}, err
-	case "type":
-		msg, err := s.doTypeText(ctx, pressArgs{SessionID: sid, stepArgs: base, Key: st.Text})
-		return msg, stepExtra{}, err
-	case "eval":
-		pretty, val, err := s.doEval(ctx, evalArgs{SessionID: sid, stepArgs: base, Script: st.Script})
-		if err != nil {
-			return "", stepExtra{}, err
-		}
-		return pretty, stepExtra{Value: val}, nil
-	case "wait":
-		msg, err := s.doWait(ctx, waitArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
-		return msg, stepExtra{}, err
-	case "sleep":
-		msg, err := s.doSleep(ctx, sleepArgs{SessionID: sid, stepArgs: base, MS: st.MS})
-		return msg, stepExtra{}, err
-	case "capture":
-		snap, text, shot, err := s.doCapture(ctx, captureArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
-		if err != nil {
-			return "", stepExtra{}, err
-		}
-		return fmt.Sprintf("界面：%s（%d 个可操作元素）", snap.Title, len(snap.Elements)),
-			stepExtra{Text: text, Elements: snap.Elements, Image: shot}, nil
-	default:
+	spec, ok := lookupAction(st.Action)
+	if !ok {
 		return "", stepExtra{}, fmt.Errorf("未知动作 %q；可用动作：%s", st.Action, actionHelp())
 	}
+	return spec.Run(ctx, s, sid, stepArgs{Intent: st.Intent, Expect: st.Expect}, st)
 }
 
 // doAct 连续执行若干步；任何一步失败就停下，并把进度说清楚。
@@ -574,10 +664,9 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 	defer cancel()
 
 	// 这一批从哪到哪：切片按这段算，不按单步。
-	batchStartMS := s.manager.NowOffset(a.SessionID)
-	var beforeSeq int
+	batch := batchSpan{startMS: s.manager.NowOffset(a.SessionID)}
 	if events, err := s.manager.Events(ctx, a.SessionID); err == nil && len(events) > 0 {
-		beforeSeq = events[len(events)-1].Seq
+		batch.beforeSeq = events[len(events)-1].Seq
 	}
 
 	var b strings.Builder
@@ -588,20 +677,12 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 			fmt.Fprintf(&b, "停止：整批超过 %s，第 %d 步还没开始。\n", batchTimeout, i+1)
 			res.StoppedAt = i + 1
 			res.OK = false
-			s.captureAfter(ctx, a.SessionID, last, &b, &res)
-			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS, a.Intent)
+			s.closeBatch(ctx, a.SessionID, last, a.Intent, batch, &b, &res)
 			return b.String(), res, nil
 		}
 
 		// 单步看门狗：eval 这类动作可能永远不返回，不能让它拖死整批。
-		stepCtx, stepCancel := context.WithTimeout(ctx, s.stepDeadline(st))
-		msg, extra, err := s.actStep(stepCtx, a.SessionID, st)
-		stepErr := stepCtx.Err()
-		stepCancel()
-		if err != nil && stepErr == context.DeadlineExceeded && ctx.Err() == nil {
-			err = fmt.Errorf("这一步超过 %s 还没返回（脚本挂住了？）；"+
-				"要固定等一段时间用 sleep，要等条件用 wait", s.stepDeadline(st))
-		}
+		msg, extra, err := s.runStep(ctx, a.SessionID, st)
 
 		if err != nil {
 			fmt.Fprintf(&b, "%d. %s ✗ %v\n", i+1, st.Action, err)
@@ -611,8 +692,7 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 			})
 			res.StoppedAt = i + 1
 			res.OK = false
-			s.captureAfter(ctx, a.SessionID, last, &b, &res)
-			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS, a.Intent)
+			s.closeBatch(ctx, a.SessionID, last, a.Intent, batch, &b, &res)
 			return b.String(), res, nil
 		}
 		fmt.Fprintf(&b, "%d. %s ✓ %s\n", i+1, st.Action, msg)
@@ -627,9 +707,40 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 	}
 	fmt.Fprintf(&b, "全部 %d 步执行完成（%.1f 秒）。", len(body), time.Since(started).Seconds())
 	res.OK = true
-	s.captureAfter(ctx, a.SessionID, last, &b, &res)
-	s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS, a.Intent)
+	s.closeBatch(ctx, a.SessionID, last, a.Intent, batch, &b, &res)
 	return b.String(), res, nil
+}
+
+// runStep 跑一步，带单步看门狗。
+//
+// 超时要换成一句能照着改的话：原始的 context deadline exceeded 只会让调用方
+// 以为整个会话坏了，而实际只是这一步的脚本挂住了。
+func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
+	deadline := s.stepDeadline(st)
+	stepCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+
+	msg, extra, err := s.actStep(stepCtx, sid, st)
+	if err != nil && errors.Is(stepCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		return msg, extra, fmt.Errorf("这一步超过 %s 还没返回（脚本挂住了？）；"+
+			"要固定等一段时间用 sleep，要等条件用 wait", deadline)
+	}
+	return msg, extra, err
+}
+
+// batchSpan 是这一批在记录里的范围：回填批次区间要用它。
+type batchSpan struct {
+	beforeSeq int
+	startMS   int64
+}
+
+// closeBatch 一批的收尾：补上收尾那一眼，再把这一段的时间区间写回事件。
+//
+// 正常跑完、某一步失败、整批超时——三种情况收尾完全一样，
+// 所以只有这一条路径（各写一遍必然会出现"某条路上忘了回填批次"）。
+func (s *Server) closeBatch(ctx context.Context, sid string, last batchStep, intent string, batch batchSpan, b *strings.Builder, res *actResult) {
+	s.captureAfter(ctx, sid, last, b, res)
+	s.markBatch(ctx, sid, batch.beforeSeq, batch.startMS, intent)
 }
 
 // batchTimeout 一批的总时限（配置项，必须小于 HTTP 中间件超时）。

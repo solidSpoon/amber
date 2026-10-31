@@ -227,16 +227,9 @@ func registerActTool(server *mcp.Server, s *Server) {
 			"intent 必填：一句话说清这一段要干什么，记录里它就是这一段的小标题（不写就没有标题，读者只能看一串点击）。" +
 			"返回三样东西：每一步的结果、执行完之后的界面（一帧整屏画面 + 可操作元素表）、以及停在第几步（失败或超时时）。" +
 			"\n\n" +
+			// 动作对照表由 actionTable 生成：说明里写着、代码里没有的动作不会再出现
 			"动作与必填字段（每个动作只管一件事，别混用）：\n" +
-			"  click  ref 或 match 或 selector 或 x+y —— 点元素\n" +
-			"  hover  同上 —— 把鼠标停在元素上（悬停才出现的浮层，如词典）\n" +
-			"  fill   ref/match/selector + text —— 覆盖填写输入框\n" +
-			"  press  key —— 按键，组合键写成 ctrl+l；页面和原生对话框都收得到\n" +
-			"  type   text —— 往当前焦点打字\n" +
-			"  eval   script —— 在页面里求值，返回值原样给你\n" +
-			"  wait   for（+timeoutMs，默认 5000）—— 等条件成立，等不到算这一步失败\n" +
-			"  sleep  ms（1~60000）—— 等固定时长，不会失败\n" +
-			"  capture 可选 for（+timeoutMs，默认 3000）—— 看一眼并留证，必须是最后一步\n" +
+			actionLines() +
 			"\n" +
 			"最后一步必须是 capture：等到界面稳定再把画面带回来，别拿动画中间帧当结果。" +
 			"这一串中间不回到你这边，所以有时效性要求的连招靠它：拖到第 6 秒立刻悬停，不会隔着你思考的那几十秒。" +
@@ -365,6 +358,12 @@ type pressArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
 	stepArgs
 	Key string `json:"key" jsonschema:"按键名"`
+}
+
+type typeArgs struct {
+	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
+	stepArgs
+	Text string `json:"text" jsonschema:"要输入的文字"`
 }
 
 type evalArgs struct {

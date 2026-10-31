@@ -113,3 +113,25 @@ func TestNormalizeActionAliases(t *testing.T) {
 		t.Fatalf("非别名不该被改写，得到 %q", got)
 	}
 }
+
+// 动作表本身要完整：三处（枚举、说明、自检）都从它长出来，缺一项就是调用方踩坑。
+func TestActionTableIsComplete(t *testing.T) {
+	for _, spec := range actionTable {
+		if spec.Name == "" || spec.Need == "" || spec.Note == "" {
+			t.Fatalf("动作 %+v 缺少名字/必填字段/说明", spec)
+		}
+		if spec.Run == nil {
+			t.Fatalf("动作 %q 没有执行体", spec.Name)
+		}
+		if got, ok := lookupAction(spec.Name); !ok || got.Name != spec.Name {
+			t.Fatalf("动作 %q 查不回来", spec.Name)
+		}
+	}
+	// 说明里每个动作都要出现，且带上"干什么"
+	lines := actionLines()
+	for _, spec := range actionTable {
+		if !strings.Contains(lines, spec.Note) {
+			t.Fatalf("动作说明里漏了 %q 的用途：%s", spec.Name, lines)
+		}
+	}
+}
