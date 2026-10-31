@@ -1,4 +1,4 @@
-// Package httpapi 提供管理台的 REST/SSE 接口，并托管内嵌的 React 前端。
+// Package httpapi 提供管理台的 REST 接口，并托管内嵌的 React 前端。
 //
 // 设计取舍：
 //   - 只做「薄适配」：校验参数、调用 session.Manager、把结果转成 DTO，业务逻辑都在 Manager 里；
@@ -7,7 +7,8 @@
 //     同一个动作有两条实现，就一定会有一条先漂（工具名、审计文案、重试策略各不相同）。
 //   - 会话操作全部有副作用，因此除查询外都用 POST，避免被浏览器预取误触发；
 //   - 截图/片段走 http.ServeFile，天然支持 Range 与缓存协商；
-//   - SSE 用轮询式推送（每 2s 推一次快照），比给每个会话建长连接简单得多，也够用。
+//   - 不做推送：页面自己按 2~3 秒轮询（控制台只要"接近实时"），
+//     少一套长连接的边界情况（重连、页面隐藏、代理超时）。
 package httpapi
 
 import (
@@ -115,7 +116,6 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}/events/{seq}/clip", s.serveClip)
 		// 用通配符而不是单段参数：产物路径带目录（shots/x.jpg、screenshots/x.png）
 		api.Get("/sessions/{id}/artifacts/*", s.serveArtifact)
-		api.Get("/sessions/stream", s.streamSessions)
 		api.Get("/sessions/{id}/screen.mjpg", s.screenStream)
 		api.Get("/machines", s.machines)
 		api.Get("/info", s.info)
@@ -127,7 +127,6 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/docs/product", s.productDoc)
 		api.Get("/feedback", s.listFeedback)
 		api.Get("/system/metrics", s.systemMetrics)
-		api.Get("/system/stream", s.streamSystem)
 	})
 
 	r.NotFound(s.serveSPA)
@@ -211,7 +210,7 @@ func toSessionDTO(s store.Session) sessionDTO {
 	return dto
 }
 
-// toSessionDTOs 把一次会话列表整体转成 DTO：列表接口和 SSE 推的是同一份形状。
+// toSessionDTOs 把一次会话列表整体转成 DTO（列表与看板共用一种形状）。
 func toSessionDTOs(sessions []store.Session) []sessionDTO {
 	out := make([]sessionDTO, 0, len(sessions))
 	for _, sess := range sessions {
@@ -258,7 +257,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 产物已经在 Prepare 里落地并校验过（入口、素材槽位），所以这里失败得快；
-	// 真正的启动仍然在后台跑，进度通过 SSE 推给前端。
+	// 真正的启动仍然在后台跑：页面轮询 /api/sessions 就能看到状态从 starting 变成 ready。
 	sess, err := s.manager.Prepare(r.Context(), session.Options{
 		Label: req.Label, Title: req.Title, Payload: req.Payload, Assets: req.Assets, Commit: req.Commit,
 	})
@@ -447,17 +446,6 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-// streamSessions 每 2s 推一次会话列表快照（SSE）。
-func (s *Server) streamSessions(w http.ResponseWriter, r *http.Request) {
-	s.streamSnapshot(w, r, func(ctx context.Context) any {
-		sessions, err := s.manager.List(ctx, 50)
-		if err != nil {
-			return map[string]any{"error": err.Error()}
-		}
-		return map[string]any{"sessions": toSessionDTOs(sessions)}
-	})
-}
-
 type sampleDTO struct {
 	At         string  `json:"at"`
 	CPUPct     float64 `json:"cpuPct"`
@@ -468,7 +456,7 @@ type sampleDTO struct {
 	Containers int     `json:"containers"`
 }
 
-// toSampleDTOs 把采样整体转成 DTO：一次性接口和 SSE 推的是同一份形状。
+// toSampleDTOs 把采样整体转成 DTO。
 func toSampleDTOs(samples []store.Sample) []sampleDTO {
 	out := make([]sampleDTO, 0, len(samples))
 	for _, m := range samples {
@@ -488,57 +476,6 @@ func (s *Server) systemMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"samples": toSampleDTOs(samples)})
-}
-
-func (s *Server) streamSystem(w http.ResponseWriter, r *http.Request) {
-	s.streamSnapshot(w, r, func(ctx context.Context) any {
-		samples, err := s.store.RecentSamples(ctx, 120)
-		if err != nil {
-			return map[string]any{"error": err.Error()}
-		}
-		return map[string]any{"samples": toSampleDTOs(samples)}
-	})
-}
-
-// streamSnapshot 是 SSE 的通用实现：定时调用 payload 并把结果推给浏览器。
-func (s *Server) streamSnapshot(w http.ResponseWriter, r *http.Request, payload func(ctx context.Context) any) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, errors.New("当前服务器不支持流式响应"))
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	send := func() bool {
-		data, err := json.Marshal(payload(r.Context()))
-		if err != nil {
-			return true
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
-			return false
-		}
-		flusher.Flush()
-		return true
-	}
-
-	if !send() {
-		return
-	}
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-			if !send() {
-				return
-			}
-		}
-	}
 }
 
 // activeSessionCount 给 readyz 用：只数个数，不必把会话整行读出来。

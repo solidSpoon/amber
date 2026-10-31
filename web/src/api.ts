@@ -17,7 +17,6 @@ export interface Session {
   title?: string;
   app: string;
   ref: string;
-  commitSha?: string;
   status: SessionStatus;
   cdpPort: number;
   vncPort: number;
@@ -174,19 +173,6 @@ export const api = {
   info: () => get<RuntimeInfo>('/api/info'),
   feedback: () => get<{ feedback: Feedback[] }>('/api/feedback?limit=20'),
 };
-
-/** 订阅 SSE；返回取消函数，组件卸载时调用。 */
-export function subscribe<T>(path: string, onData: (payload: T) => void): () => void {
-  const source = new EventSource(path);
-  source.onmessage = (event) => {
-    try {
-      onData(JSON.parse(event.data) as T);
-    } catch {
-      // 单帧解析失败不应该打断整条流
-    }
-  };
-  return () => source.close();
-}
 
 /** 机器槽位的显示名：M1 / M2 ……依次类推 */
 export function machineName(slot: number): string {
