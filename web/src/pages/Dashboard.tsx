@@ -49,7 +49,9 @@ export default function Dashboard() {
           一屏两台机器，往下翻才是数字和流水。 */}
       {/* 高度按"视口高度减去外面几层 padding"算：main 的 p-4/6/8 + 这里的 py。
           算准了，第一屏底部就不会漏出下一节的边。 */}
-      <section className="flex min-h-[calc(100svh-2rem)] flex-col justify-center gap-10 py-6 md:min-h-[calc(100svh-3rem)] lg:min-h-[calc(100svh-4rem)] lg:py-10">
+      {/* 手机上不撑满一屏：两台机器是上下堆着的，"一屏两台"的版式在手机上只会变成大片空白。
+          窄屏改成从顶部排起，资源数字紧跟其后。 */}
+      <section className="flex flex-col justify-center gap-8 py-2 max-sm:min-h-0 max-sm:justify-start max-sm:gap-6 sm:min-h-[calc(100svh-2rem)] sm:gap-10 sm:py-6 md:min-h-[calc(100svh-3rem)] lg:min-h-[calc(100svh-4rem)] lg:py-10">
         {error && (
           <Card className="border-destructive/30 bg-destructive/5">
             <CardContent className="text-sm text-destructive">读取看板数据失败：{error}</CardContent>
@@ -163,8 +165,10 @@ function MachineCard({ machine }: { machine: Machine }) {
     // 反算出来的宽度（乘 1.17 是机身图的宽高比）。撑满栏宽的后果是机身把铭牌顶出首屏，
     // 看板第一眼只能看到两张大图，看不到“这台机器在干什么”。
     <article
-      className="mx-auto flex w-full flex-col items-center"
-      style={{ maxWidth: 'min(100%, 40rem, calc((100svh - 12rem) * 1.17))' }}
+      // 手机上两台是上下堆着的：机身收到 74%，两台和铭牌才装得下一屏。
+      // 宽度上限只能写在 inline style 里（要和 svh 一起算），所以手机那一档用 CSS 变量传进去。
+      className="mx-auto flex w-full flex-col items-center max-sm:[--cap:74%]"
+      style={{ maxWidth: 'min(var(--cap, 100%), 40rem, calc((100svh - 12rem) * 1.17))' }}
     >
       {/* 机身用 Apple 官方那张设备渲染图当外框（public/img/frame.png）。
           那张图本身是"透明屏"素材：屏幕区域是全透明的洞，周围的机器是不透明的，
@@ -225,7 +229,7 @@ function MachineCard({ machine }: { machine: Machine }) {
           高度写死不好，但参差更难看——在线的时候这里是三行（编号+徽章 / 这次会话 / CPU 内存 已运行），
           空闲只有两行。空着的那行用 min-h 占住，两台机器的铭牌才能上下对齐。
           话往上看：铭牌一长，早先底部对齐的布局就会把有会话那台的机身顶高一截。 */}
-      <div className="mt-2 flex min-h-[4.5rem] w-full flex-col gap-0.5 px-1">
+      <div className="mt-2 flex min-h-[4.5rem] w-full flex-col gap-0.5 px-1 max-sm:min-h-0">
         <div className="flex items-baseline gap-2">
           <div className="flex items-baseline gap-2">
             <span className="text-sm font-semibold">{machineName(machine.slot)}</span>

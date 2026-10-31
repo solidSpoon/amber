@@ -10,6 +10,16 @@ import { PageHeader } from '@/components/page-header';
 import { StatusBadge, VerdictBadge } from '@/components/session-badges';
 import { api, formatAgo, type Session } from '../api';
 
+/** 产物来源的短标签：手机上一行只放得下"哪一个产物"，不是整条路径 */
+function payloadShort(payload?: string): string {
+  const raw = payload ?? '';
+  if (raw.startsWith('dir:')) {
+    const parts = raw.slice(4).replace(/\/+$/, '').split('/').filter(Boolean);
+    return parts.slice(-2).join('/') || raw;
+  }
+  return raw.replace(/^manifest:sha256:/, '') || '—';
+}
+
 /**
  * 会话列表：只看，不建。
  *
@@ -80,56 +90,101 @@ export default function Sessions() {
               </EmptyHeader>
             </Empty>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>会话</TableHead>
-                  <TableHead>产物 / 版本</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>结论</TableHead>
-                  <TableHead>创建</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+            <>
+              {/* 手机：六列表格在 390px 上只能横向滚，改成一条会话一张卡——
+                  手机上没有“扫一眼表格”这件事，只有“往下翻着看”。 */}
+              <div className="flex flex-col gap-2 md:hidden">
                 {sessions.map((s) => {
                   const running = !['finished', 'failed', 'abandoned'].includes(s.status);
                   return (
-                    <TableRow key={s.id}>
-                      <TableCell className="max-w-[26rem]">
-                        {/* 标题是这次验收的意图：读者按它认人，会话 ID 退到第二行 */}
-                        <a href={`#/sessions/${s.id}`} className="block hover:underline">
+                    <div key={s.id} className="flex flex-col gap-1.5 rounded-lg border p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <a href={`#/sessions/${s.id}`} className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium">{s.title || s.app}</div>
                           <div className="truncate font-mono text-[11px] text-muted-foreground">{s.id}</div>
                         </a>
-                      </TableCell>
-                      <TableCell className="max-w-[22rem]">
-                        <div className="truncate">{s.app}</div>
-                        <div className="truncate font-mono text-[11px] text-muted-foreground">
-                          {(s.payload || '—').replace(/^manifest:sha256:/, '')}
-                          {s.ref ? ` · ${s.ref}` : ''}
-                        </div>
-                      </TableCell>
-                      <TableCell>
                         <StatusBadge status={s.status} />
-                      </TableCell>
-                      <TableCell>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                         <VerdictBadge verdict={s.verdict} />
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{formatAgo(s.createdAt)}</TableCell>
-                      <TableCell className="text-right">
+                        <span>{s.app}</span>
+                        <span>{formatAgo(s.createdAt)}</span>
                         {running && (
                           <Button variant="ghost" size="xs" onClick={() => void onStop(s.id)} title="AI 卡死或断连时用">
                             <SquareIcon data-icon="inline-start" />
                             强制回收
                           </Button>
                         )}
-                      </TableCell>
-                    </TableRow>
+                      </div>
+                      {/* 手机上长路径只剩开头几个字符，等于没写：这里只留末尾两段，
+                          完整来源放到 title 里，需要时点开看 */}
+                      <div className="truncate font-mono text-[11px] text-muted-foreground" title={s.payload}>
+                        {payloadShort(s.payload)}
+                        {s.ref ? ` · ${s.ref}` : ''}
+                      </div>
+                    </div>
                   );
                 })}
-              </TableBody>
-            </Table>
+              </div>
+
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>会话</TableHead>
+                      <TableHead>产物 / 版本</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>结论</TableHead>
+                      <TableHead>创建</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sessions.map((s) => {
+                      const running = !['finished', 'failed', 'abandoned'].includes(s.status);
+                      return (
+                        <TableRow key={s.id}>
+                          <TableCell className="max-w-[26rem]">
+                            {/* 标题是这次验收的意图：读者按它认人，会话 ID 退到第二行 */}
+                            <a href={`#/sessions/${s.id}`} className="block hover:underline">
+                              <div className="truncate text-sm font-medium">{s.title || s.app}</div>
+                              <div className="truncate font-mono text-[11px] text-muted-foreground">{s.id}</div>
+                            </a>
+                          </TableCell>
+                          <TableCell className="max-w-[22rem]">
+                            <div className="truncate">{s.app}</div>
+                            <div className="truncate font-mono text-[11px] text-muted-foreground">
+                              {(s.payload || '—').replace(/^manifest:sha256:/, '')}
+                              {s.ref ? ` · ${s.ref}` : ''}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={s.status} />
+                          </TableCell>
+                          <TableCell>
+                            <VerdictBadge verdict={s.verdict} />
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{formatAgo(s.createdAt)}</TableCell>
+                          <TableCell className="text-right">
+                            {running && (
+                              <Button
+                                variant="ghost"
+                                size="xs"
+                                onClick={() => void onStop(s.id)}
+                                title="AI 卡死或断连时用"
+                              >
+                                <SquareIcon data-icon="inline-start" />
+                                强制回收
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>

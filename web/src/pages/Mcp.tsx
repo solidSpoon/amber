@@ -121,27 +121,42 @@ export default function Mcp() {
           <CardDescription>清单来自服务自身 tools/list，不是手写文档。</CardDescription>
         </CardHeader>
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>工具</TableHead>
-                {/* 说明是全表最长的一列，允许换行，否则会把"必填参数"挤出卡片 */}
-                <TableHead className="whitespace-normal">说明</TableHead>
-                <TableHead>必填参数</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {info.tools.map((tool) => (
-                <TableRow key={tool.name} className="align-top">
-                  <TableCell className="font-mono text-xs whitespace-nowrap">{tool.name}</TableCell>
-                  <TableCell className="whitespace-normal text-muted-foreground">{tool.description}</TableCell>
-                  <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
-                    {(tool.required ?? []).join(', ') || '—'}
-                  </TableCell>
+          {/* 手机：三列表格放不下（说明被挤成一列字，必填参数整列在屏幕外），改成一条工具一张卡 */}
+          <div className="flex flex-col gap-2 md:hidden">
+            {info.tools.map((tool) => (
+              <div key={tool.name} className="flex flex-col gap-1 rounded-lg border p-3">
+                <code className="font-mono text-xs font-medium">{tool.name}</code>
+                <p className="text-xs leading-relaxed text-muted-foreground">{tool.description}</p>
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  必填：{(tool.required ?? []).join(', ') || '—'}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>工具</TableHead>
+                  {/* 说明是全表最长的一列，允许换行，否则会把"必填参数"挤出卡片 */}
+                  <TableHead className="whitespace-normal">说明</TableHead>
+                  <TableHead>必填参数</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {info.tools.map((tool) => (
+                  <TableRow key={tool.name} className="align-top">
+                    <TableCell className="font-mono text-xs whitespace-nowrap">{tool.name}</TableCell>
+                    <TableCell className="whitespace-normal text-muted-foreground">{tool.description}</TableCell>
+                    <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
+                      {(tool.required ?? []).join(', ') || '—'}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 

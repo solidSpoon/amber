@@ -59,7 +59,8 @@ export default function App() {
         // 不再借 buttonVariants：它的 padding 会跟这里的 px-3.5 打架（同特异性比的是输出顺序，
         // 谁在后谁赢，结果导航项的图标缩进变成 6px）。导航项样式自己写，反而干净。
         className={cn(
-          'flex h-10 items-center gap-2.5 rounded-md px-3.5 text-[0.8125rem] font-medium transition-colors',
+          // shrink-0 + nowrap：窄屏顶部导航是横向滚动的，允许收缩的话中文会被挤成竖排
+          'flex h-10 shrink-0 items-center gap-2.5 rounded-md px-3.5 text-[0.8125rem] font-medium whitespace-nowrap transition-colors',
           'outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
           // 选中态必须把 hover 也写死，否则鼠标一放上去底色会被 hover 覆盖，
           // 看起来像"选中丢了"——这正是之前那个怪象
@@ -93,15 +94,20 @@ export default function App() {
         <nav className="flex flex-col gap-1">{links}</nav>
       </aside>
 
-      <nav className="flex shrink-0 items-center gap-1 overflow-x-auto border-b bg-sidebar px-3 py-2 md:hidden">
-        <span className="mr-2 flex shrink-0 items-center gap-1.5">
-          <img src="/amber.svg" alt="" width={20} height={20} className="size-5" />
-          <span className="text-sm font-semibold tracking-tight">Amber</span>
-        </span>
-        {links}
-      </nav>
+      {/* 手机上的导航：品牌只留图标（文字太占地方，五个标签挤不下），标签横排、超宽横向滚动。
+          外面的 main 是独立滚动区，所以这条不会跟着正文走。 */}
+      <div className="relative shrink-0 border-b bg-sidebar md:hidden">
+        <nav className="flex items-center gap-1 overflow-x-auto px-2 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <span className="mr-1 flex shrink-0 items-center">
+            <img src="/amber.svg" alt="Amber" width={22} height={22} className="size-[22px]" />
+          </span>
+          {links}
+        </nav>
+        {/* 右边那一道渐变是"还能往右滑"的提示：手机上五个标签放不下，没有它看着像被裁掉了 */}
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-sidebar to-transparent" />
+      </div>
 
-      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 md:p-6 lg:p-8">
+      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 lg:p-8">
         {route.name === 'dashboard' && <Dashboard />}
         {route.name === 'sessions' && <Sessions />}
         {route.name === 'session' && <SessionDetail id={route.id} />}

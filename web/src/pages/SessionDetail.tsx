@@ -67,7 +67,7 @@ export default function SessionDetail({ id }: { id: string }) {
   return (
     // 详情页的主体是画面证据：栏宽给到 1440，画面列再单独放大，
     // 否则在宽屏上这一段只有一张邮票大，读者得点开才能看清发生了什么。
-    <div className="mx-auto flex w-full max-w-[88rem] flex-col gap-6">
+    <div className="mx-auto flex w-full max-w-[88rem] flex-col gap-5 sm:gap-6">
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Button variant="ghost" size="sm" render={<a href="#/sessions" />}>
@@ -439,7 +439,9 @@ function BatchRow({
   const end = Math.max(0, group.events[group.events.length - 1].videoOffsetMs);
 
   return (
-    <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] sm:gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,42rem)]">
+    // 窄屏是一列：文字 → 截图 → 这一段的画面。手机上两张全宽的图会把一屏塞满，
+    // 所以截图在这里收窄成"证据缩略图"，主画面（片段）才占满宽。
+    <li className="grid gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] sm:gap-8 sm:py-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,42rem)]">
       <div className="flex min-w-0 flex-col gap-2">
         <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
           <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
@@ -456,7 +458,7 @@ function BatchRow({
         </div>
 
         {/* 批内明细：一行一步，只写做什么和结果，不铺开意图/期望 */}
-        <ul className="flex flex-col gap-0.5 pl-6 text-[11px] text-muted-foreground/80">
+        <ul className="flex flex-col gap-0.5 pl-4 text-[11px] text-muted-foreground/80 sm:pl-6">
           {group.events.filter((e) => !isSleepStep(e)).map((event) => (
             <li key={event.seq} className="flex items-baseline gap-2">
               <span className="text-muted-foreground/50">·</span>
@@ -471,7 +473,7 @@ function BatchRow({
         {/* 截图贴在文字下面：先读完"做了什么"，紧跟着就是"当时交回去的那一帧"。
             比右栏的录像略小一圈——它是证据，不是主画面。 */}
         {shots.length > 0 && (
-          <div className="flex flex-col gap-2 pl-6 sm:max-w-[22rem]">
+          <div className="mt-1 flex max-w-[68%] flex-col gap-2 pl-4 sm:mt-0 sm:max-w-[22rem] sm:pl-6">
             {shots.map((event) => (
               <ShotTile
                 key={event.seq}
