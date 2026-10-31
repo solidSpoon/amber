@@ -35,7 +35,7 @@ func (s *Server) doCapture(ctx context.Context, a captureArgs) (inspect.Snapshot
 		Intent:     a.Intent,
 		Expect:     a.Expect,
 		AlwaysShot: true,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
+	}, func(ctx context.Context, insp session.Inspector, _ *session.Step) (string, string, error) {
 		// 等不到条件不算这一步失败：capture 的价值是"留下当时的样子"，
 		// 没等到就照实说明没等到，画面照样带回去。
 		waited, waitErr := waitForCondition(ctx, insp, a.For, a.TimeoutMS, defaultCaptureWait)
@@ -114,17 +114,17 @@ type locator interface {
 	Locate(ctx context.Context, match, selector string) (string, error)
 }
 
-// resolveRef 把「引用号 / 可见文字 / CSS 选择器」统一成一个引用号。
+// locate 把「引用号 / 可见文字 / CSS 选择器」统一成一个引用号。
 //
 // 批里必须支持后两种：引用号是某次 snapshot 的产物，页面一变就作废，
 // 而连招里要点的按钮往往在这一步才出现。
-func (s *Server) resolveRef(ctx context.Context, sid, ref, match, selector string) (string, error) {
+//
+// 它必须在 Record 的执行体里调用：定位失败也是"这一步做了但没成"，
+// 要走同一条审计闸门。原来在闸门外先定位，找不到元素时整步都不进记录——
+// 记录里于是只剩一句"什么都点了一下"，读者看不出模型想点哪个按钮。
+func locate(ctx context.Context, insp session.Inspector, ref, match, selector string) (string, error) {
 	if ref != "" || (match == "" && selector == "") {
 		return ref, nil
-	}
-	insp, err := s.manager.Inspector(ctx, sid)
-	if err != nil {
-		return "", err
 	}
 	l, ok := insp.(locator)
 	if !ok {
@@ -135,24 +135,24 @@ func (s *Server) resolveRef(ctx context.Context, sid, ref, match, selector strin
 
 // doClick 点一个元素（引用号优先，可用可见文字/选择器，坐标兜底）。
 func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
-	ref, err := s.resolveRef(ctx, a.SessionID, a.Ref, a.Match, a.Selector)
-	if err != nil {
-		return "", err
-	}
-	a.Ref = ref
 	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "click", Args: map[string]any{"ref": a.Ref, "x": a.X, "y": a.Y},
-		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
-		if a.Ref != "" {
-			if err := insp.Click(ctx, a.Ref); err != nil {
+		Tool: "click", Args: targetArgs("ref", a.Ref, "match", a.Match, "selector", a.Selector, "x", a.X, "y", a.Y),
+		Intent: a.Intent, Expect: a.Expect,
+	}, func(ctx context.Context, insp session.Inspector, step *session.Step) (string, string, error) {
+		ref, err := locate(ctx, insp, a.Ref, a.Match, a.Selector)
+		if err != nil {
+			return "", "", err
+		}
+		if ref != "" {
+			step.ShotRef = ref
+			if err := insp.Click(ctx, ref); err != nil {
 				return "", "", err
 			}
 			// 记录里写元素的名字，不写引用号：读者不认识 q1/e5
-			if el, ok := s.manager.Describe(insp, a.Ref); ok && el.Name != "" {
+			if el, ok := s.manager.Describe(insp, ref); ok && el.Name != "" {
 				return "已点击「" + el.Name + "」", "", nil
 			}
-			return "已点击 " + a.Ref, "", nil
+			return "已点击 " + ref, "", nil
 		}
 		if err := insp.ClickAt(ctx, a.X, a.Y); err != nil {
 			return "", "", err
@@ -164,23 +164,23 @@ func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
 
 // doHover 把鼠标移到元素上：悬停才出现的浮层（词典释义）用它。
 func (s *Server) doHover(ctx context.Context, a clickArgs) (string, error) {
-	ref, err := s.resolveRef(ctx, a.SessionID, a.Ref, a.Match, a.Selector)
-	if err != nil {
-		return "", err
-	}
-	a.Ref = ref
 	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "hover", Args: map[string]any{"ref": a.Ref, "x": a.X, "y": a.Y},
-		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
-		if a.Ref != "" {
-			if err := insp.Hover(ctx, a.Ref); err != nil {
+		Tool: "hover", Args: targetArgs("ref", a.Ref, "match", a.Match, "selector", a.Selector, "x", a.X, "y", a.Y),
+		Intent: a.Intent, Expect: a.Expect,
+	}, func(ctx context.Context, insp session.Inspector, step *session.Step) (string, string, error) {
+		ref, err := locate(ctx, insp, a.Ref, a.Match, a.Selector)
+		if err != nil {
+			return "", "", err
+		}
+		if ref != "" {
+			step.ShotRef = ref
+			if err := insp.Hover(ctx, ref); err != nil {
 				return "", "", err
 			}
-			if el, ok := s.manager.Describe(insp, a.Ref); ok && el.Name != "" {
+			if el, ok := s.manager.Describe(insp, ref); ok && el.Name != "" {
 				return "已把鼠标移到「" + el.Name + "」上", "", nil
 			}
-			return "已移入 " + a.Ref, "", nil
+			return "已移入 " + ref, "", nil
 		}
 		if err := insp.HoverAt(ctx, a.X, a.Y); err != nil {
 			return "", "", err
@@ -190,18 +190,29 @@ func (s *Server) doHover(ctx context.Context, a clickArgs) (string, error) {
 	return rec.Result, err
 }
 
+// targetArgs 组装"要操作哪个元素"的参数，留着 match/selector 让记录说得出想点的是谁。
+func targetArgs(kv ...any) map[string]any {
+	args := make(map[string]any, len(kv)/2)
+	for i := 0; i+1 < len(kv); i += 2 {
+		key, _ := kv[i].(string)
+		args[key] = kv[i+1]
+	}
+	return args
+}
+
 // doFill 覆盖填写文本，可选回车提交。
 func (s *Server) doFill(ctx context.Context, a fillArgs) (string, error) {
-	ref, err := s.resolveRef(ctx, a.SessionID, a.Ref, a.Match, a.Selector)
-	if err != nil {
-		return "", err
-	}
-	a.Ref = ref
 	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "fill", Args: map[string]any{"ref": a.Ref, "text": a.Text},
-		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
-		if err := insp.Fill(ctx, a.Ref, a.Text); err != nil {
+		Tool:   "fill",
+		Args:   targetArgs("ref", a.Ref, "match", a.Match, "selector", a.Selector, "text", a.Text),
+		Intent: a.Intent, Expect: a.Expect,
+	}, func(ctx context.Context, insp session.Inspector, step *session.Step) (string, string, error) {
+		ref, err := locate(ctx, insp, a.Ref, a.Match, a.Selector)
+		if err != nil {
+			return "", "", err
+		}
+		step.ShotRef = ref
+		if err := insp.Fill(ctx, ref, a.Text); err != nil {
 			return "", "", err
 		}
 		return fmt.Sprintf("已填入 %q", a.Text), "", nil
@@ -217,7 +228,7 @@ func (s *Server) doPress(ctx context.Context, a pressArgs) (string, error) {
 	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "press", Args: map[string]any{"key": a.Key}, Intent: a.Intent, Expect: a.Expect,
 		Caption: "按下 " + a.Key,
-	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
+	}, func(ctx context.Context, _ session.Inspector, _ *session.Step) (string, string, error) {
 		if err := s.manager.DesktopKey(ctx, a.SessionID, a.Key); err != nil {
 			return "", "", err
 		}
@@ -231,7 +242,7 @@ func (s *Server) doTypeText(ctx context.Context, a typeArgs) (string, error) {
 	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "type", Args: map[string]any{"text": a.Text}, Intent: a.Intent, Expect: a.Expect,
 		Caption: "输入「" + a.Text + "」",
-	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
+	}, func(ctx context.Context, _ session.Inspector, _ *session.Step) (string, string, error) {
 		if err := s.manager.DesktopType(ctx, a.SessionID, a.Text); err != nil {
 			return "", "", err
 		}
@@ -245,7 +256,7 @@ func (s *Server) doEval(ctx context.Context, a evalArgs) (string, any, error) {
 	var out any
 	_, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "eval", Args: map[string]any{"script": a.Script}, Intent: a.Intent, Expect: a.Expect,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
+	}, func(ctx context.Context, insp session.Inspector, _ *session.Step) (string, string, error) {
 		raw, err := insp.Evaluate(ctx, a.Script)
 		if err != nil {
 			return "", "", err
@@ -282,7 +293,7 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "wait", Args: map[string]any{"for": expr, "timeoutMs": timeout.Milliseconds()},
 		Intent: a.Intent, Expect: a.Expect,
-	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
+	}, func(ctx context.Context, insp session.Inspector, _ *session.Step) (string, string, error) {
 		elapsed, werr := waitForCondition(ctx, insp, expr, a.TimeoutMS, 5000)
 		if werr != nil {
 			return "", "", werr
@@ -300,7 +311,7 @@ func (s *Server) doSleep(ctx context.Context, a sleepArgs) (string, error) {
 	waited := time.Duration(a.MS) * time.Millisecond
 	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "sleep", Args: map[string]any{"ms": a.MS}, Intent: a.Intent, Expect: a.Expect,
-	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
+	}, func(ctx context.Context, _ session.Inspector, _ *session.Step) (string, string, error) {
 		select {
 		case <-ctx.Done():
 			return "", "", ctx.Err()

@@ -588,11 +588,6 @@ func (m *Manager) Describe(insp Inspector, ref string) (inspect.Element, bool) {
 	return describer.Describe(ref)
 }
 
-// Inspector 取（必要时重建）检查器，供上层在录制一步之前先做定位。
-func (m *Manager) Inspector(ctx context.Context, id string) (Inspector, error) {
-	return m.inspector(ctx, id)
-}
-
 // inspector 取（必要时重建）检查器。
 func (m *Manager) inspector(ctx context.Context, id string) (Inspector, error) {
 	live, ok := m.liveOf(id)
@@ -626,10 +621,19 @@ type Recorded struct {
 	Artifact string
 }
 
+// Action 一次动作的执行体。
+//
+// step 是可以回填的：有些信息只有执行时才知道（按文字定位到的引用号、实际点中的元素），
+// 回填之后 Record 才能给它配上截图高亮和"点击「保存」按钮"这样的说明。
+// 回填不是改写记录：工具名、参数、意图在第一个人手里就定了。
+type Action func(ctx context.Context, insp Inspector, step *Step) (result string, artifact string, err error)
+
 // Record 执行一次工具调用并写审计：参数、结果摘要、耗时、在录像里的偏移量。
 //
 // 所有对外动作都必须走这里，否则审计会出现空洞——那正是这个项目最不能接受的。
-func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (Recorded, error) {
+// 注意 fn 里的任何失败（包括"按文字找不到元素"这种还没发出点击的失败）都会以
+// ok=false 进记录：读者要看到的是"模型想点那个按钮，但页面上没有"。
+func (m *Manager) Record(ctx context.Context, id string, step Step, fn Action) (Recorded, error) {
 	insp, err := m.inspector(ctx, id)
 	if err != nil {
 		step.Caption = captionFor(step, nil)
@@ -638,7 +642,7 @@ func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx 
 	}
 
 	started := time.Now()
-	result, artifact, callErr := fn(ctx, insp)
+	result, artifact, callErr := fn(ctx, insp, &step)
 	// CDP 连接会因为应用重载、DevTools 断开而失效；这时重连一次再试，
 	// 而不是让这个会话之后所有操作都报 "use of closed network connection"。
 	if callErr != nil && isTransportError(callErr) {
@@ -646,7 +650,7 @@ func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx 
 		m.dropInspector(id)
 		if fresh, err := m.inspector(ctx, id); err == nil {
 			insp = fresh
-			result, artifact, callErr = fn(ctx, insp)
+			result, artifact, callErr = fn(ctx, insp, &step)
 		}
 	}
 	duration := time.Since(started)

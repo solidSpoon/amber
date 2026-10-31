@@ -1,0 +1,16 @@
+1
+00:00:01,000 --> 00:00:04,000
+The quick brown fox jumps over the lazy dog.
+
+2
+00:00:05,000 --> 00:00:09,000
+Serendipity means finding something lucky by chance.
+
+3
+00:00:10,000 --> 00:00:14,000
+We watched the ephemeral light fade across the valley.
+
+4
+00:00:15,000 --> 00:00:19,000
+A ubiquitous idea spreads everywhere at once.
+

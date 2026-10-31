@@ -253,7 +253,7 @@ func TestRecordWritesAuditWithVideoOffset(t *testing.T) {
 	m.mu.Unlock()
 
 	if _, err := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e1"}},
-		func(ctx context.Context, i Inspector) (string, string, error) {
+		func(ctx context.Context, i Inspector, _ *Step) (string, string, error) {
 			return "clicked e1", "", i.Click(ctx, "e1")
 		}); err != nil {
 		t.Fatalf("记录点击失败: %v", err)
@@ -287,7 +287,7 @@ func TestRecordLogsFailedToolCall(t *testing.T) {
 	}
 
 	_, callErr := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e404"}},
-		func(context.Context, Inspector) (string, string, error) {
+		func(context.Context, Inspector, *Step) (string, string, error) {
 			return "", "", errors.New("元素引用已失效")
 		})
 	if callErr == nil {

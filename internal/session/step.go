@@ -84,11 +84,20 @@ func captionFor(step Step, el *inspect.Element) string {
 	}
 
 	ref := strings.TrimSpace(args.str("ref"))
+	// 按文字/选择器找元素时，那串文字就是读者要认的东西：定位失败（元素根本没出现）
+	// 也要写得出"想点的是「Skip」"，否则记录里只剩一句"点了一下"。
+	wanted := strings.TrimSpace(args.str("match"))
+	selector := strings.TrimSpace(args.str("selector"))
 	byRef := func(verb string) string {
 		// 有引用号但元素没有可读名字：写引用号 + 角色，绝不退化成坐标
 		// （ref 点击的坐标恒为 0,0，写成「点击 (0, 0)」纯属误导）
-		if el != nil && el.Role != "" {
+		switch {
+		case el != nil && el.Role != "":
 			return fmt.Sprintf("%s %s（%s）", verb, ref, el.Role)
+		case wanted != "":
+			return fmt.Sprintf("%s「%s」", verb, wanted)
+		case selector != "":
+			return fmt.Sprintf("%s %s", verb, selector)
 		}
 		return fmt.Sprintf("%s %s", verb, ref)
 	}
@@ -98,7 +107,7 @@ func captionFor(step Step, el *inspect.Element) string {
 		if target != "" {
 			return "点击" + target
 		}
-		if ref != "" {
+		if ref != "" || wanted != "" || selector != "" {
 			return byRef("点击")
 		}
 		if x, y, ok := args.coord(); ok {
@@ -109,7 +118,7 @@ func captionFor(step Step, el *inspect.Element) string {
 		if target != "" {
 			return "把鼠标移到" + target + "上"
 		}
-		if ref != "" {
+		if ref != "" || wanted != "" || selector != "" {
 			return byRef("移入")
 		}
 		if x, y, ok := args.coord(); ok {
@@ -117,14 +126,18 @@ func captionFor(step Step, el *inspect.Element) string {
 		}
 		return "移入元素"
 	case "fill":
-		text := truncateString(args.str("text"), 60)
-		if target != "" {
-			return fmt.Sprintf("在%s填入 %s", target, quote(text))
+		text := quote(truncateString(args.str("text"), 60))
+		switch {
+		case target != "":
+			return fmt.Sprintf("在%s填入 %s", target, text)
+		case wanted != "":
+			return fmt.Sprintf("在「%s」填入 %s", wanted, text)
+		case selector != "":
+			return fmt.Sprintf("在 %s 填入 %s", selector, text)
+		case ref != "":
+			return fmt.Sprintf("在 %s 填入 %s", ref, text)
 		}
-		if ref != "" {
-			return fmt.Sprintf("在 %s 填入 %s", ref, quote(text))
-		}
-		return fmt.Sprintf("填入 %s", quote(text))
+		return fmt.Sprintf("填入 %s", text)
 	case "press":
 		return "按下 " + strings.TrimSpace(fmt.Sprint(args["key"]))
 	case "eval":
