@@ -122,6 +122,37 @@ func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
 	return msg, err
 }
 
+// doHover 把鼠标移到元素上：悬停才出现的浮层（词典释义）用它。
+func (s *Server) doHover(ctx context.Context, a clickArgs) (string, error) {
+	if a.Ref == "" && a.Match == "" && a.Selector == "" && a.X == 0 && a.Y == 0 {
+		return "", errors.New("hover 需要 ref、match/selector 或 x/y")
+	}
+	ref, err := s.resolveRef(ctx, a.SessionID, a.Ref, a.Match, a.Selector)
+	if err != nil {
+		return "", err
+	}
+	a.Ref = ref
+	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+		Tool: "hover", Args: map[string]any{"ref": a.Ref, "x": a.X, "y": a.Y},
+		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
+	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
+		if a.Ref != "" {
+			if err := insp.Hover(ctx, a.Ref); err != nil {
+				return "", "", err
+			}
+			if el, ok := s.manager.Describe(insp, a.Ref); ok && el.Name != "" {
+				return "已把鼠标移到「" + el.Name + "」上", "", nil
+			}
+			return "已移入 " + a.Ref, "", nil
+		}
+		if err := insp.HoverAt(ctx, a.X, a.Y); err != nil {
+			return "", "", err
+		}
+		return fmt.Sprintf("已移入坐标 (%.0f, %.0f)", a.X, a.Y), "", nil
+	})
+	return msg, err
+}
+
 // doFill 覆盖填写文本，可选回车提交。
 func (s *Server) doFill(ctx context.Context, a fillArgs) (string, error) {
 	ref, err := s.resolveRef(ctx, a.SessionID, a.Ref, a.Match, a.Selector)
@@ -293,6 +324,9 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 	case "click":
 		msg, err := s.doClick(ctx, clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y})
 		return msg, stepExtra{}, err
+	case "hover":
+		msg, err := s.doHover(ctx, clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y})
+		return msg, stepExtra{}, err
 	case "fill":
 		msg, err := s.doFill(ctx, fillArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, Text: st.Text, Submit: st.Submit})
 		return msg, stepExtra{}, err
@@ -316,8 +350,11 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 		return fmt.Sprintf("已截图：%s（%d 字节）", st.Label, size), stepExtra{Value: path}, nil
 	case "desktop":
 		// 原生对话框、系统菜单这类 CDP 够不到的地方
-		if st.Op == "" || st.Value == "" {
-			return "", stepExtra{}, errors.New("desktop 需要 op（key/type）和 value")
+		if st.Op == "" {
+			return "", stepExtra{}, errors.New("desktop 需要 op（key/type/move）")
+		}
+		if st.Op != "move" && st.Value == "" {
+			return "", stepExtra{}, errors.New("desktop 的 key/type 需要 value")
 		}
 		caption := "按下 " + st.Value
 		if st.Op == "type" {
@@ -328,6 +365,11 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 			Intent: base.Intent, Expect: base.Expect, Caption: caption,
 		}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
 			switch st.Op {
+			case "move":
+				if err := s.manager.DesktopMove(ctx, sid, int(st.X), int(st.Y)); err != nil {
+					return "", "", err
+				}
+				return fmt.Sprintf("已把鼠标移到屏幕坐标 (%.0f, %.0f)", st.X, st.Y), "", nil
 			case "key":
 				if err := s.manager.DesktopKey(ctx, sid, st.Value); err != nil {
 					return "", "", err

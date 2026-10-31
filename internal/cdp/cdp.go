@@ -285,6 +285,16 @@ func (c *Client) capture(ctx context.Context, format string, quality int) (strin
 	return out.Data, nil
 }
 
+// MouseMove 把鼠标移到页面坐标 (x, y) 上。
+//
+// 悬停类交互（鼠标移到单词上弹词典）只认这个：点击只有按下/抬起，
+// 不会触发页面的 mouseover。
+func (c *Client) MouseMove(ctx context.Context, x, y float64) error {
+	return c.Call(ctx, "Input.dispatchMouseEvent", map[string]any{
+		"type": "mouseMoved", "x": x, "y": y, "button": "none",
+	}, nil)
+}
+
 // ClickAt 在页面坐标 (x, y) 上模拟一次真实鼠标点击。
 //
 // 用坐标而不是直接 DOM.click()：前者会经过命中测试与事件冒泡，跟真人点击一致，

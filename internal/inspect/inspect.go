@@ -233,6 +233,33 @@ func (c *Client) Click(ctx context.Context, ref string) error {
 	return c.cdp.ClickAt(ctx, x, y)
 }
 
+// Hover 把鼠标移到元素上（悬停才会出现的浮层用它）。
+//
+// 连发两次移动：第一次让元素进入 hover 状态，页面此时才会挂上自己的
+// mousemove 监听；只发一次的话，监听还没生效，浮层就不会出来。
+func (c *Client) Hover(ctx context.Context, ref string) error {
+	el, err := c.Resolve(ref)
+	if err != nil {
+		return err
+	}
+	x := float64(el.Box[0]) + float64(el.Box[2])/2
+	y := float64(el.Box[1]) + float64(el.Box[3])/2
+	// 走出一点轨迹：悬停浮层通常要连续几个 mousemove 才判定"停在了这个元素上"，
+	// 一步跳进去往往只触发一次 mouseover，随后就被判成移出。
+	for _, dx := range []float64{-12, -6, 0, 6, 12} {
+		if err := c.cdp.MouseMove(ctx, x+dx, y); err != nil {
+			return err
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	return nil
+}
+
+// HoverAt 把鼠标移到页面坐标上。
+func (c *Client) HoverAt(ctx context.Context, x, y float64) error {
+	return c.cdp.MouseMove(ctx, x, y)
+}
+
 // ClickAt 按坐标点击（兜底：原生弹窗、自绘控件）。
 func (c *Client) ClickAt(ctx context.Context, x, y float64) error {
 	return c.cdp.ClickAt(ctx, x, y)

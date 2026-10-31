@@ -38,6 +38,8 @@ import (
 type Inspector interface {
 	Snapshot(ctx context.Context) (inspect.Snapshot, error)
 	Click(ctx context.Context, ref string) error
+	Hover(ctx context.Context, ref string) error
+	HoverAt(ctx context.Context, x, y float64) error
 	ClickAt(ctx context.Context, x, y float64) error
 	Fill(ctx context.Context, ref, text string) error
 	Press(ctx context.Context, key string) error

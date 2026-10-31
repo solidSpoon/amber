@@ -88,6 +88,9 @@ func (f *fakeInspector) Click(_ context.Context, ref string) error {
 
 func (f *fakeInspector) ClickAt(context.Context, float64, float64) error { return nil }
 
+func (f *fakeInspector) Hover(context.Context, string) error             { return nil }
+func (f *fakeInspector) HoverAt(context.Context, float64, float64) error { return nil }
+
 func (f *fakeInspector) Fill(_ context.Context, ref, text string) error {
 	if f.filled == nil {
 		f.filled = map[string]string{}

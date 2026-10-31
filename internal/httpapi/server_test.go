@@ -54,6 +54,8 @@ func (f *fakeInspector) Snapshot(context.Context) (inspect.Snapshot, error) {
 }
 func (f *fakeInspector) Click(context.Context, string) error             { return nil }
 func (f *fakeInspector) ClickAt(context.Context, float64, float64) error { return nil }
+func (f *fakeInspector) Hover(context.Context, string) error             { return nil }
+func (f *fakeInspector) HoverAt(context.Context, float64, float64) error { return nil }
 func (f *fakeInspector) Fill(context.Context, string, string) error      { return nil }
 func (f *fakeInspector) Press(context.Context, string) error             { return nil }
 func (f *fakeInspector) Evaluate(context.Context, string) (json.RawMessage, error) {

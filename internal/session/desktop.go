@@ -16,6 +16,13 @@ func (m *Manager) DesktopKey(ctx context.Context, id, combo string) error {
 	return m.xdotool(ctx, id, "key", "--clearmodifiers", combo)
 }
 
+// DesktopMove 把鼠标移到屏幕坐标上（真实指针轨迹）。
+//
+// 有些悬停交互只认真实指针：CDP 的合成 mouseMoved 到不了 React 的 hover 状态。
+func (m *Manager) DesktopMove(ctx context.Context, id string, x, y int) error {
+	return m.xdotool(ctx, id, "mousemove", "--sync", fmt.Sprint(x), fmt.Sprint(y))
+}
+
 // DesktopType 在 X 层输入一段文字。
 func (m *Manager) DesktopType(ctx context.Context, id, text string) error {
 	return m.xdotool(ctx, id, "type", "--delay", "20", text)
