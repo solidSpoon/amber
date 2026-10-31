@@ -146,32 +146,26 @@ export default function SessionDetail({ id }: { id: string }) {
   );
 }
 
-/** 画面外框：点开看大图的那层壳，所有画面都走它，样式只写一份 */
-function MediaTile({
-  label,
-  onZoom,
-  children,
-}: {
-  label?: string;
-  onZoom: () => void;
-  children: ReactNode;
-}) {
+/**
+ * 画面外框：点开看大图的那层壳，所有画面都走它，样式只写一份。
+ *
+ * 不配图注：左边那段文字已经把它是什么说完了（截图是这一批的结论帧、片段是这一段的过程），
+ * 再在图片下面挂一行"这一步的画面"只是把同一句话说两遍。
+ */
+function MediaTile({ onZoom, children }: { onZoom: () => void; children: ReactNode }) {
   return (
-    <figure className="flex flex-col gap-1">
+    <figure>
       <button
         onClick={onZoom}
         className="group relative block w-full cursor-zoom-in overflow-hidden rounded-md bg-neutral-950 ring-1 ring-black/10 transition hover:ring-2 hover:ring-foreground/20"
         title="点开看大图"
-        aria-label={label ? `${label} 的画面` : '画面'}
+        aria-label="点开看大图"
       >
         {children}
         <span className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100">
           <Maximize2Icon className="size-4 text-white drop-shadow" />
         </span>
       </button>
-      {label && (
-        <figcaption className="truncate text-[11px] leading-snug text-muted-foreground/80">{label}</figcaption>
-      )}
     </figure>
   );
 }
@@ -211,7 +205,7 @@ function ClipPlayer({
   }, [inView]);
 
   return (
-    <MediaTile label="这一段的画面" onZoom={onZoom}>
+    <MediaTile onZoom={onZoom}>
       <ScreenStage display={display} className="rounded-none border-0">
         <video
           // key 带上 seq：不然 React 会复用同一个 video 元素，切换批次时还放着上一段的画面
@@ -256,10 +250,9 @@ function ShotTile({
   onZoom: () => void;
 }) {
   if (!event.shot) return null;
-  // capture 的截图就是这一段的结论帧，读者不必再猜"这张是过程还是结果"
-  const label = event.tool === 'capture' ? '这一步的画面' : event.caption;
+  // 截图就是这一批收尾时交回的那一帧，放在文字下面；不再配一行图注说明它是什么
   return (
-    <MediaTile label={label} onZoom={onZoom}>
+    <MediaTile onZoom={onZoom}>
       <img
         src={`/api/sessions/${sessionId}/artifacts/${event.shot}`}
         alt={event.caption}
