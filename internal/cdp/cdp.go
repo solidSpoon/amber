@@ -29,8 +29,13 @@ type target struct {
 
 // Client 绑定到某一个 page target 的连接。
 type Client struct {
-	conn    *websocket.Conn
+	conn *websocket.Conn
+	// mu 保护 pending/nextID；writeMu 保护连接上的写。
+	//
+	// gorilla/websocket 不允许并发写（会直接 panic），而 Call 是可能被两个
+	// goroutine 同时调到的（一批动作里同步量窗口 + 下一步操作），所以写单独一把锁。
 	mu      sync.Mutex
+	writeMu sync.Mutex
 	nextID  int64
 	pending map[int64]chan rawResponse
 	closed  chan struct{}
@@ -193,9 +198,15 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
+		c.forget(id)
 		return fmt.Errorf("序列化 CDP 请求失败: %w", err)
 	}
-	if err := c.conn.WriteMessage(websocket.TextMessage, body); err != nil {
+	c.writeMu.Lock()
+	err = c.conn.WriteMessage(websocket.TextMessage, body)
+	c.writeMu.Unlock()
+	if err != nil {
+		// 写失败时这个 id 永远等不到响应：清掉，别让 pending 表慢慢长大
+		c.forget(id)
 		return fmt.Errorf("发送 CDP 请求失败: %w", err)
 	}
 
@@ -215,6 +226,13 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 		}
 		return nil
 	}
+}
+
+// forget 丢掉一个等不到响应的请求。
+func (c *Client) forget(id int64) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
 }
 
 // Evaluate 在页面里执行表达式，返回 result.value 的原始 JSON。

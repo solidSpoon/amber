@@ -5,3 +5,5 @@ web/dist/
 *.db-wal
 *.db-shm
 rigd-data/
+# 回归测试用的临时素材目录（本地放着，不进仓库）
+.tmp-media/
