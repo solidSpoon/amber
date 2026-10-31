@@ -55,7 +55,7 @@ export default function Dashboard() {
             <CardContent className="text-sm text-destructive">读取看板数据失败：{error}</CardContent>
           </Card>
         )}
-        <div className="grid items-end gap-14 md:grid-cols-2 md:gap-16 lg:gap-24">
+        <div className="grid items-start gap-10 md:grid-cols-2 md:gap-10 lg:gap-14">
           {machines.length === 0 && !error && (
             <>
               <MonitorSkeleton />
@@ -158,13 +158,20 @@ function MachineCard({ machine }: { machine: Machine }) {
   const screenSrc = machine.sessionId ? `/api/sessions/${machine.sessionId}/screen.mjpg` : '';
 
   return (
-    <article className="mx-auto flex w-full max-w-[880px] flex-col items-center">
+    // 尺寸只由一件事决定：**一屏要同时装下两台机器和它们的铭牌**。
+    // 所以不按栏宽撑满，而是三条上限取最小：列宽、40rem、以及「视口高度减掉铭牌与留白」
+    // 反算出来的宽度（乘 1.17 是机身图的宽高比）。撑满栏宽的后果是机身把铭牌顶出首屏，
+    // 看板第一眼只能看到两张大图，看不到“这台机器在干什么”。
+    <article
+      className="mx-auto flex w-full flex-col items-center"
+      style={{ maxWidth: 'min(100%, 40rem, calc((100svh - 12rem) * 1.17))' }}
+    >
       {/* 机身用 Apple 官方那张设备渲染图当外框（public/img/frame.png）。
           那张图本身是"透明屏"素材：屏幕区域是全透明的洞，周围的机器是不透明的，
           所以内容是**垫在下面**、透过洞露出来的，不是贴在图上。
 
-          屏幕矩形是量出来的：原图 1912×1633 里，屏在 x 46→1873、y 46→1073。
-          换成百分比写在下面，换一张分辨率不同的渲染图时只需要重算这四个数。 */}
+          屏幕矩形是量出来的：原图 1912×1633（现用的 frame.png 是 1600×1367，同比例）里，
+          屏在 x 46→1873、y 46→1073。换成百分比写在下面，换一张分辨率不同的渲染图时只需要重算这四个数。 */}
       <div className="relative w-full" style={{ aspectRatio: '1912 / 1633' }}>
         {/* 内容比洞大 3px 的四周：外框内沿有一圈抗锯齿的半透明像素，
             正好贴上会漏出一条白边，压进去一点就没了（多出来的部分被黑边框盖住）。 */}
@@ -214,8 +221,11 @@ function MachineCard({ machine }: { machine: Machine }) {
         />
       </div>
 
-      {/* 铭牌 */}
-      <div className="mt-3 flex w-full flex-col gap-1 px-1">
+      {/* 铭牌：
+          高度写死不好，但参差更难看——在线的时候这里是三行（编号+徽章 / 这次会话 / CPU 内存 已运行），
+          空闲只有两行。空着的那行用 min-h 占住，两台机器的铭牌才能上下对齐。
+          话往上看：铭牌一长，早先底部对齐的布局就会把有会话那台的机身顶高一截。 */}
+      <div className="mt-2 flex min-h-[4.5rem] w-full flex-col gap-0.5 px-1">
         <div className="flex items-baseline gap-2">
           <div className="flex items-baseline gap-2">
             <span className="text-sm font-semibold">{machineName(machine.slot)}</span>
@@ -230,13 +240,16 @@ function MachineCard({ machine }: { machine: Machine }) {
         </div>
         {/* 铭牌上写「这台机器此刻在干什么」，不写会话 ID：ID 是内部编号，
             人看的是这台机器被谁占着、在做什么。单独一行，避免被挤到卡片另一头。 */}
-        {online && machine.sessionId && (
+        {online && machine.sessionId ? (
           <a
             href={`#/sessions/${machine.sessionId}`}
             className="max-w-full truncate text-xs text-foreground/80 hover:text-foreground hover:underline"
           >
             {machine.title || machine.app || '这次会话'} →
           </a>
+        ) : (
+          // 占位：空闲时没有会话链接，但那一行的高度要留着，否则铭牌一短、两列就错位
+          <span className="h-4" aria-hidden />
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
           {online ? (
