@@ -29,7 +29,7 @@ import (
 // 画面是整块屏幕（session 层对着虚拟屏抓帧），所以原生对话框、系统菜单也在里面。
 func (s *Server) doCapture(ctx context.Context, a captureArgs) (inspect.Snapshot, string, []byte, error) {
 	var snap inspect.Snapshot
-	step, result, _, err := s.manager.RecordStep(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool:       "capture",
 		Args:       map[string]any{"for": a.For, "timeoutMs": a.TimeoutMS},
 		Intent:     a.Intent,
@@ -61,14 +61,14 @@ func (s *Server) doCapture(ctx context.Context, a captureArgs) (inspect.Snapshot
 	}
 	// 记录里那张图就是回给模型的这张：一次抓帧，两处用同一份证据。
 	var shot []byte
-	if step.Shot != "" {
+	if rec.Step.Shot != "" {
 		if sess, gerr := s.manager.Get(ctx, a.SessionID); gerr == nil && sess.Dir != "" {
-			if raw, rerr := os.ReadFile(filepath.Join(sess.Dir, step.Shot)); rerr == nil {
+			if raw, rerr := os.ReadFile(filepath.Join(sess.Dir, rec.Step.Shot)); rerr == nil {
 				shot = raw
 			}
 		}
 	}
-	return snap, result, shot, nil
+	return snap, rec.Result, shot, nil
 }
 
 // waitForCondition 轮询一个 JS 条件，返回等了多久（没给条件就是 0 秒、不等待）。
@@ -140,7 +140,7 @@ func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
 		return "", err
 	}
 	a.Ref = ref
-	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "click", Args: map[string]any{"ref": a.Ref, "x": a.X, "y": a.Y},
 		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
@@ -159,7 +159,7 @@ func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
 		}
 		return fmt.Sprintf("已点击坐标 (%.0f, %.0f)", a.X, a.Y), "", nil
 	})
-	return msg, err
+	return rec.Result, err
 }
 
 // doHover 把鼠标移到元素上：悬停才出现的浮层（词典释义）用它。
@@ -169,7 +169,7 @@ func (s *Server) doHover(ctx context.Context, a clickArgs) (string, error) {
 		return "", err
 	}
 	a.Ref = ref
-	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "hover", Args: map[string]any{"ref": a.Ref, "x": a.X, "y": a.Y},
 		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
@@ -187,7 +187,7 @@ func (s *Server) doHover(ctx context.Context, a clickArgs) (string, error) {
 		}
 		return fmt.Sprintf("已移入坐标 (%.0f, %.0f)", a.X, a.Y), "", nil
 	})
-	return msg, err
+	return rec.Result, err
 }
 
 // doFill 覆盖填写文本，可选回车提交。
@@ -197,7 +197,7 @@ func (s *Server) doFill(ctx context.Context, a fillArgs) (string, error) {
 		return "", err
 	}
 	a.Ref = ref
-	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "fill", Args: map[string]any{"ref": a.Ref, "text": a.Text},
 		Intent: a.Intent, Expect: a.Expect, ShotRef: a.Ref,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
@@ -206,7 +206,7 @@ func (s *Server) doFill(ctx context.Context, a fillArgs) (string, error) {
 		}
 		return fmt.Sprintf("已填入 %q", a.Text), "", nil
 	})
-	return msg, err
+	return rec.Result, err
 }
 
 // doPress 给当前焦点发一次按键（组合键也行，如 ctrl+l）。
@@ -214,7 +214,7 @@ func (s *Server) doFill(ctx context.Context, a fillArgs) (string, error) {
 // 走系统层而不是页面的键盘事件：真实按键页面和原生对话框都收得到，
 // 一套动作覆盖两种情况，AI 不用判断"该用哪个按键动作"。
 func (s *Server) doPress(ctx context.Context, a pressArgs) (string, error) {
-	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "press", Args: map[string]any{"key": a.Key}, Intent: a.Intent, Expect: a.Expect,
 		Caption: "按下 " + a.Key,
 	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
@@ -223,12 +223,12 @@ func (s *Server) doPress(ctx context.Context, a pressArgs) (string, error) {
 		}
 		return "已按下 " + a.Key, "", nil
 	})
-	return msg, err
+	return rec.Result, err
 }
 
 // doTypeText 往当前焦点敲一段字（原生对话框里输路径用它）。
 func (s *Server) doTypeText(ctx context.Context, a typeArgs) (string, error) {
-	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "type", Args: map[string]any{"text": a.Text}, Intent: a.Intent, Expect: a.Expect,
 		Caption: "输入「" + a.Text + "」",
 	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
@@ -237,13 +237,13 @@ func (s *Server) doTypeText(ctx context.Context, a typeArgs) (string, error) {
 		}
 		return "已输入 " + a.Text, "", nil
 	})
-	return msg, err
+	return rec.Result, err
 }
 
 // doEval 在页面里求值。
 func (s *Server) doEval(ctx context.Context, a evalArgs) (string, any, error) {
 	var out any
-	_, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	_, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "eval", Args: map[string]any{"script": a.Script}, Intent: a.Intent, Expect: a.Expect,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
 		raw, err := insp.Evaluate(ctx, a.Script)
@@ -279,7 +279,7 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 		timeout = time.Minute
 	}
 
-	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "wait", Args: map[string]any{"for": expr, "timeoutMs": timeout.Milliseconds()},
 		Intent: a.Intent, Expect: a.Expect,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
@@ -289,7 +289,7 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 		}
 		return fmt.Sprintf("条件成立（等了 %.1f 秒）", elapsed.Seconds()), "", nil
 	})
-	return msg, err
+	return rec.Result, err
 }
 
 // doSleep 等一段固定时间。
@@ -298,7 +298,7 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 // 而且它不该因为"条件没成立"而失败。要等条件成立用 wait。
 func (s *Server) doSleep(ctx context.Context, a sleepArgs) (string, error) {
 	waited := time.Duration(a.MS) * time.Millisecond
-	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	rec, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "sleep", Args: map[string]any{"ms": a.MS}, Intent: a.Intent, Expect: a.Expect,
 	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
 		select {
@@ -308,7 +308,7 @@ func (s *Server) doSleep(ctx context.Context, a sleepArgs) (string, error) {
 		}
 		return fmt.Sprintf("等了 %d 毫秒", a.MS), "", nil
 	})
-	return msg, err
+	return rec.Result, err
 }
 
 // ---- 批 -------------------------------------------------------------------

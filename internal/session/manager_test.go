@@ -252,7 +252,7 @@ func TestRecordWritesAuditWithVideoOffset(t *testing.T) {
 	m.live[sess.ID].recordingStartMs = time.Now().UnixMilli()
 	m.mu.Unlock()
 
-	if _, _, err := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e1"}},
+	if _, err := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e1"}},
 		func(ctx context.Context, i Inspector) (string, string, error) {
 			return "clicked e1", "", i.Click(ctx, "e1")
 		}); err != nil {
@@ -286,7 +286,7 @@ func TestRecordLogsFailedToolCall(t *testing.T) {
 		t.Fatalf("起会话失败: %v", err)
 	}
 
-	_, _, callErr := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e404"}},
+	_, callErr := m.Record(ctx, sess.ID, Step{Tool: "click", Args: map[string]any{"ref": "e404"}},
 		func(context.Context, Inspector) (string, string, error) {
 			return "", "", errors.New("元素引用已失效")
 		})

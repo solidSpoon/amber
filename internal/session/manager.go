@@ -612,21 +612,29 @@ func (m *Manager) inspector(ctx context.Context, id string) (Inspector, error) {
 	return insp, nil
 }
 
+// Recorded 一次工具调用在记录里留下的东西。
+//
+// 用一个结构体而不是 (Step, string, string, error)：两个并列的 string 谁是谁
+// 全靠记，传反了编译器也不会拦。capture 要用 Step.Shot（那张图就是回给模型的那张），
+// 其余动作只关心 Result。
+type Recorded struct {
+	// Step 记完的那一步（Caption / Shot 已经填好）
+	Step Step
+	// Result 这一步的结果摘要：成功时是"已点击「保存」按钮"，失败时是错误信息
+	Result string
+	// Artifact 产出的文件（相对会话目录），一般没有
+	Artifact string
+}
+
 // Record 执行一次工具调用并写审计：参数、结果摘要、耗时、在录像里的偏移量。
 //
 // 所有对外动作都必须走这里，否则审计会出现空洞——那正是这个项目最不能接受的。
-func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (string, string, error) {
-	_, result, artifact, err := m.RecordStep(ctx, id, step, fn)
-	return result, artifact, err
-}
-
-// RecordStep 与 Record 相同，但把记完的这一步也交回来（capture 要用它取那张画面）。
-func (m *Manager) RecordStep(ctx context.Context, id string, step Step, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (Step, string, string, error) {
+func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (Recorded, error) {
 	insp, err := m.inspector(ctx, id)
 	if err != nil {
 		step.Caption = captionFor(step, nil)
 		m.writeEvent(ctx, id, step, eventOutcome{Result: err.Error(), OffsetMS: -1})
-		return step, "", "", err
+		return Recorded{Step: step}, err
 	}
 
 	started := time.Now()
@@ -642,19 +650,7 @@ func (m *Manager) RecordStep(ctx context.Context, id string, step Step, fn func(
 		}
 	}
 	duration := time.Since(started)
-
-	m.mu.Lock()
-	offset := int64(-1)
-	if live, ok := m.live[id]; ok {
-		live.lastActivity = time.Now()
-		if live.recordingStartMs > 0 {
-			offset = started.UnixMilli() - live.recordingStartMs
-			if offset < 0 {
-				offset = 0
-			}
-		}
-	}
-	m.mu.Unlock()
+	offset := m.touchAndOffset(id, started)
 
 	msg := result
 	if callErr != nil {
@@ -687,9 +683,30 @@ func (m *Manager) RecordStep(ctx context.Context, id string, step Step, fn func(
 	m.syncFrame(ctx, id, insp)
 
 	if callErr != nil {
-		return step, "", artifact, callErr
+		return Recorded{Step: step, Artifact: artifact}, callErr
 	}
-	return step, result, artifact, nil
+	return Recorded{Step: step, Result: result, Artifact: artifact}, nil
+}
+
+// touchAndOffset 记一次活动，并算出这一步在录像里的位置。
+//
+// 偏移量按"动作开始的那一刻"算，不是按写记录的时刻：截图和落库要花几百毫秒，
+// 用写记录的时间会把整条记录往后拖。
+func (m *Manager) touchAndOffset(id string, started time.Time) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	live, ok := m.live[id]
+	if !ok {
+		return -1
+	}
+	live.lastActivity = time.Now()
+	if live.recordingStartMs <= 0 {
+		return -1
+	}
+	if offset := started.UnixMilli() - live.recordingStartMs; offset > 0 {
+		return offset
+	}
+	return 0
 }
 
 // eventOutcome 一条审计里"发生了什么"的部分；其余字段（工具、参数、说明）从 Step 来。
