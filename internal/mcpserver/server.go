@@ -206,7 +206,11 @@ func registerRunTool(server *mcp.Server, s *Server) {
 		if err != nil {
 			return nil, runResult{}, err
 		}
+		// 跑完的界面：先给图（模型看状态靠它），再给需要时截的图
 		out := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
+		if len(res.After) > 0 {
+			out.Content = append(out.Content, &mcp.ImageContent{Data: res.After, MIMEType: "image/jpeg"})
+		}
 		// 把画面带上（最多 3 张）：验证 UI 不能只看元素树——布局错位、空白页、
 		// 样式崩了，都只有画面能看出来。snapshot 自带一帧，截图动作带它截的那张。
 		for _, r := range res.Steps {
@@ -253,6 +257,10 @@ type runResult struct {
 	OK        bool            `json:"ok"`
 	Steps     []runStepResult `json:"steps"`
 	StoppedAt int             `json:"stoppedAt,omitempty"`
+	// Elements 跑完之后界面上的可操作元素（模型接着点要用）
+	Elements []inspect.Element `json:"elements,omitempty"`
+	// After 跑完之后的一帧画面（不进 JSON）
+	After []byte `json:"-"`
 }
 
 type runStepResult struct {

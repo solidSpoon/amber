@@ -407,6 +407,7 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 			})
 			res.StoppedAt = i + 1
 			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
+			s.attachCurrent(ctx, a.SessionID, a.Steps, &b, &res)
 			return b.String(), res, nil
 		}
 		fmt.Fprintf(&b, "%d. %s ✓ %s\n", i+1, st.Action, msg)
@@ -426,7 +427,44 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 	}
 	res.OK = true
 	s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
+	s.attachCurrent(ctx, a.SessionID, a.Steps, &b, &res)
 	return b.String(), res, nil
+}
+
+// attachCurrent 跑完一批后，自动附上"现在界面长什么样"。
+//
+// 不做的话，模型跑完一批还得再调一次 snapshot 才知道结果——又是一次往返，
+// 正好把批的意义抵消掉。这里不记步骤：它不是这次操作的一部分，是把结果给模型看。
+func (s *Server) attachCurrent(ctx context.Context, sid string, steps []batchStep, b *strings.Builder, res *runResult) {
+	// 最后一步已经是 snapshot 的话别重复取，直接把它那份提上来
+	if len(steps) > 0 && steps[len(steps)-1].Action == "snapshot" {
+		if n := len(res.Steps); n > 0 {
+			res.Elements = res.Steps[n-1].Elements
+			res.After = res.Steps[n-1].Image
+			// 提上来就够了，别在步骤里再带一份
+			res.Steps[n-1].Image = nil
+		}
+		return
+	}
+	insp, err := s.manager.Inspector(ctx, sid)
+	if err != nil {
+		return
+	}
+	snap, err := insp.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	res.Elements = snap.Elements
+	if previewer, ok := insp.(interface {
+		PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
+	}); ok {
+		if raw, err := previewer.PreviewJPEG(ctx, 70); err == nil {
+			res.After = raw
+		}
+	}
+	if !res.OK {
+		fmt.Fprintf(b, "\n停在这里的界面：%d 个可操作元素（见下图）", len(snap.Elements))
+	}
 }
 
 // markBatch 把这一批的起止补进刚写入的事件里。
