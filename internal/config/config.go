@@ -79,7 +79,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Addr:           env("RIGD_ADDR", "127.0.0.1:8088"),
 		DataDir:        env("RIGD_DATA_DIR", defaultDataDir()),
-		Image:          env("RIGD_IMAGE", "electron-acceptance-rig:latest"),
+		Image:          env("RIGD_IMAGE", "rigd-desktop:latest"),
 		DockerBin:      env("RIGD_DOCKER", "docker"),
 		WorkspaceRoots: envList("RIGD_WORKSPACE_ROOTS", ":"),
 		MaxSessions:    envInt("RIGD_MAX_SESSIONS", 2),

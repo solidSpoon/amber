@@ -39,7 +39,7 @@ setsid nohup bash -c 'docker build ... > /tmp/build.log 2>&1; echo EXIT=$? >> /t
 被测产物在**哪台机器编**，运行时就得至少一样新。宿主 Arch（glibc 2.44）编出来的 Electron
 原生模块，在 Ubuntu 24.04（glibc 2.39）里直接 `GLIBC_2.44 not found`。
 
-所以运行时镜像（`electron-acceptance-rig`）用 Arch 基座，和构建机同源。
+所以运行时镜像（`deploy/desktop`，`make image` 构建）用 Arch 基座，和构建机同源。
 **改基座之前先问**：这个产物是在什么环境构建的？
 
 ### 4. 一次只改一层

@@ -24,7 +24,7 @@ func sampleSession(id string) Session {
 		App:       "DashPlayer",
 		Ref:       "main",
 		CommitSHA: "9da4ce76",
-		Image:     "electron-acceptance-rig:latest",
+		Image:     "rigd-desktop:latest",
 		Status:    StatusStarting,
 		CDPPort:   9222,
 		VNCPort:   6080,

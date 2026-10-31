@@ -283,6 +283,11 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		"RIG_ENTRY":      payload.Entry,
 		"RIG_READY_CDP":  fmt.Sprint(payload.Recipe.Ready.CDP),
 		"RIG_READY_SEC":  fmt.Sprint(payload.Recipe.Ready.TimeoutSec),
+		// 每台机器一个独立的屏号。容器走 --network=host，X 的 socket 落在
+		// 共享的网络命名空间里（抽象套接字不受 /tmp 隔离），两台机器都用 :99
+		// 时后起的那台会直接 "server already running" 起不来。
+		// 屏号跟槽位绑，重启后同一槽位还是同一个号，录像取景不用重算。
+		"DISPLAY_NUM": fmt.Sprint(90 + sess.Slot),
 	}
 	argsJSON := "[]"
 	if len(payload.Recipe.Args) > 0 {

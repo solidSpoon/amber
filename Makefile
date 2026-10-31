@@ -34,6 +34,11 @@ run: build ## 本地跑起来（数据目录可覆盖）
 mcp: build ## 以 MCP stdio 模式运行（给外部 AI 客户端用）
 	$(BIN) --mcp
 
+# 一次性机器的运行时镜像。--network=host：docker 的 bridge 网络在这台机器上极慢，
+# 走宿主网络才不至于卡在 pacman 同步上。层缓存在，改脚本重构建只要几秒。
+image: ## 构建一次性机器的运行时镜像（rigd-desktop:latest）
+	docker build --network=host -t rigd-desktop:latest deploy/desktop
+
 clean:
 	rm -rf bin web/dist
 
