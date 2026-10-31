@@ -211,44 +211,65 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 	return sess, nil
 }
 
-// retainSources 给用到的 manifest 加引用；尽力而为（失败只告警，不影响会话）。
-func (m *Manager) retainSources(ctx context.Context, payload string, assets map[string]string) {
-	all := make([]string, 0, len(assets)+1)
-	all = append(all, payload)
+// eachManifestSource 遍历这次会话引用到的所有 manifest（产物 + 素材）。
+//
+// 引用和释放必须看到同一份清单：两边各拼一遍，加个新来源就会"只加引用不释放"，
+// 表现是产物永远回收不掉。
+func (m *Manager) eachManifestSource(payload string, assets map[string]string, fn func(digest string)) {
+	sources := make([]string, 0, len(assets)+1)
+	sources = append(sources, payload)
 	for _, value := range assets {
-		all = append(all, value)
+		sources = append(sources, value)
 	}
-	for _, raw := range all {
+	seen := make(map[string]bool, len(sources))
+	for _, raw := range sources {
 		src, err := ParseSource(raw)
-		if err != nil || src.Kind != "manifest" {
+		if err != nil || src.Kind != "manifest" || seen[src.Digest] {
 			continue
 		}
-		if err := m.store.Retain(ctx, "manifest", src.Digest); err != nil {
-			m.log.Warn("增加产物引用失败", "manifest", src.Digest, "err", err)
-		}
+		seen[src.Digest] = true
+		fn(src.Digest)
 	}
+}
+
+// retainSources 给用到的 manifest 加引用；尽力而为（失败只告警，不影响会话）。
+func (m *Manager) retainSources(ctx context.Context, payload string, assets map[string]string) {
+	m.eachManifestSource(payload, assets, func(digest string) {
+		if err := m.store.Retain(ctx, "manifest", digest); err != nil {
+			m.log.Warn("增加产物引用失败", "manifest", digest, "err", err)
+		}
+	})
 }
 
 // releaseSources 归还引用（收尾时调用），让 GC 能把没人用的产物删掉。
 func (m *Manager) releaseSources(ctx context.Context, sess store.Session) {
-	all := make([]string, 0, 4)
-	all = append(all, sess.Payload)
-	var assets map[string]string
-	if sess.Assets != "" {
-		_ = json.Unmarshal([]byte(sess.Assets), &assets)
-	}
-	for _, value := range assets {
-		all = append(all, value)
-	}
-	for _, raw := range all {
-		src, err := ParseSource(raw)
-		if err != nil || src.Kind != "manifest" {
-			continue
+	m.eachManifestSource(sess.Payload, decodeAssets(sess.Assets), func(digest string) {
+		if err := m.store.Release(ctx, "manifest", digest); err != nil {
+			m.log.Warn("释放产物引用失败", "manifest", digest, "err", err)
 		}
-		if err := m.store.Release(ctx, "manifest", src.Digest); err != nil {
-			m.log.Warn("释放产物引用失败", "manifest", src.Digest, "err", err)
-		}
+	})
+}
+
+// liveOf 取内存里的会话状态（没有就是不在运行中）。
+func (m *Manager) liveOf(id string) (*liveSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	live, ok := m.live[id]
+	return live, ok
+}
+
+// fail 把会话标记成失败并落库，返回写好错误的那份会话。
+//
+// 失败路径有五六处（产物对不上、容器起不来、应用没就绪、重启时接管不了……），
+// 每处都手写这三个字段，迟早会漏掉一个，于是库里出现了"失败但没有结束时间"的会话。
+func (m *Manager) fail(ctx context.Context, sess store.Session, reason string) store.Session {
+	sess.Status = store.StatusFailed
+	sess.Error = reason
+	sess.EndedAt = time.Now()
+	if err := m.store.UpdateSession(ctx, sess); err != nil {
+		m.log.Warn("写入失败状态失败", "session", sess.ID, "err", err)
 	}
+	return sess
 }
 
 // displayOf 是这台机器在容器里的 X 屏号。
@@ -274,11 +295,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 
 	payload, err := m.resolvePayload(ctx, sess.Dir, sess.Payload, decodeAssets(sess.Assets), false)
 	if err != nil {
-		sess.Status = store.StatusFailed
-		sess.Error = err.Error()
-		sess.EndedAt = time.Now()
-		_ = m.store.UpdateSession(ctx, sess)
-		return sess, err
+		return m.fail(ctx, sess, err.Error()), err
 	}
 
 	env := map[string]string{
@@ -337,11 +354,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 
 	containerID, err := m.docker.Run(ctx, spec)
 	if err != nil {
-		sess.Status = store.StatusFailed
-		sess.Error = err.Error()
-		sess.EndedAt = time.Now()
-		_ = m.store.UpdateSession(ctx, sess)
-		return sess, fmt.Errorf("启动容器失败: %w", err)
+		return m.fail(ctx, sess, err.Error()), fmt.Errorf("启动容器失败: %w", err)
 	}
 
 	sess.Container = containerID
@@ -360,10 +373,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		if err := m.docker.Remove(ctx, containerName); err != nil {
 			m.log.Warn("删除失败容器时出错", "session", id, "err", err)
 		}
-		sess.Status = store.StatusFailed
-		sess.Error = detail
-		sess.EndedAt = time.Now()
-		_ = m.store.UpdateSession(ctx, sess)
+		sess = m.fail(ctx, sess, detail)
 		if err := m.docker.Stop(ctx, containerName, 10*time.Second); err != nil {
 			m.log.Warn("停掉未就绪的容器失败", "session", id, "err", err)
 		}
@@ -415,9 +425,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 //
 // verdict/summary 由调用方给（外部 AI 的结论）；为空时状态仍是 finished，只是没有判定。
 func (m *Manager) Stop(ctx context.Context, id, verdict, summary string) (store.Session, error) {
-	m.mu.Lock()
-	live, ok := m.live[id]
-	m.mu.Unlock()
+	live, ok := m.liveOf(id)
 	if !ok {
 		// 不在内存里：可能已被超时回收或进程重启，回落到库里的记录
 		sess, err := m.store.GetSession(ctx, id)
@@ -501,13 +509,9 @@ func (m *Manager) finalize(ctx context.Context, sess store.Session, verdict, sum
 
 // Get 取会话（内存里有就用最新的）。
 func (m *Manager) Get(ctx context.Context, id string) (store.Session, error) {
-	m.mu.Lock()
-	if live, ok := m.live[id]; ok {
-		sess := live.session
-		m.mu.Unlock()
-		return sess, nil
+	if live, ok := m.liveOf(id); ok {
+		return live.session, nil
 	}
-	m.mu.Unlock()
 	return m.store.GetSession(ctx, id)
 }
 
@@ -526,9 +530,7 @@ func (m *Manager) Events(ctx context.Context, id string) ([]store.Event, error) 
 // 批次要用它圈定"这一段连续操作"的起止：一批一条录像，不是每步一条。
 // 记录里每一步的偏移量也走这里——偏移量只有这一个算法，别处不要自己减。
 func (m *Manager) NowOffset(id string) int64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	live, ok := m.live[id]
+	live, ok := m.liveOf(id)
 	if !ok || live.recordingStartMs <= 0 {
 		return -1
 	}
@@ -548,10 +550,10 @@ func (m *Manager) SetBatchMeta(ctx context.Context, id string, fromSeq, toSeq in
 
 // Touch 记录一次活动，顺延空闲回收时间点。
 func (m *Manager) Touch(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if live, ok := m.live[id]; ok {
+	if live, ok := m.liveOf(id); ok {
+		m.mu.Lock()
 		live.lastActivity = time.Now()
+		m.mu.Unlock()
 	}
 }
 
@@ -571,9 +573,7 @@ func (m *Manager) Inspector(ctx context.Context, id string) (Inspector, error) {
 
 // inspector 取（必要时重建）检查器。
 func (m *Manager) inspector(ctx context.Context, id string) (Inspector, error) {
-	m.mu.Lock()
-	live, ok := m.live[id]
-	m.mu.Unlock()
+	live, ok := m.liveOf(id)
 	if !ok {
 		return nil, fmt.Errorf("会话 %s 不在运行中", id)
 	}
@@ -603,7 +603,7 @@ func (m *Manager) RecordStep(ctx context.Context, id string, step Step, fn func(
 	insp, err := m.inspector(ctx, id)
 	if err != nil {
 		step.Caption = captionFor(step, nil)
-		m.writeEvent(ctx, id, step, err.Error(), "", 0, false, -1)
+		m.writeEvent(ctx, id, step, eventOutcome{Result: err.Error(), OffsetMS: -1})
 		return step, "", "", err
 	}
 
@@ -656,7 +656,9 @@ func (m *Manager) RecordStep(ctx context.Context, id string, step Step, fn func(
 			step.Shot = m.captureShot(auditCtx, id, sess.Dir, insp, step)
 		}
 	}
-	m.writeEvent(auditCtx, id, step, msg, artifact, duration.Milliseconds(), ok, offset)
+	m.writeEvent(auditCtx, id, step, eventOutcome{
+		Result: msg, Artifact: artifact, DurationMS: duration.Milliseconds(), OK: ok, OffsetMS: offset,
+	})
 
 	// 应用可能在动作的副作用里自己改窗口（登录后切全屏、从大窗缩回默认尺寸）。
 	// 记在动作之后：记录里的顺序就是「点了什么 → 应用因此变成了什么样」。
@@ -668,33 +670,44 @@ func (m *Manager) RecordStep(ctx context.Context, id string, step Step, fn func(
 	return step, result, artifact, nil
 }
 
-func (m *Manager) writeEvent(ctx context.Context, id string, step Step, result, artifact string, durationMS int64, ok bool, offset int64) {
+// eventOutcome 一条审计里"发生了什么"的部分；其余字段（工具、参数、说明）从 Step 来。
+//
+// 单独一个结构体是因为这几个值都长得差不多："" 和 "0" 挨在一起传，
+// 顺序错一个编译器也不会拦（当初把 result 和 artifact 传反过）。
+type eventOutcome struct {
+	// Result 给读者看的结果摘要（失败时是错误信息）
+	Result string
+	// Artifact 这一步产出的文件（相对会话目录），一般没有
+	Artifact string
+	// DurationMS 这一步花了多久
+	DurationMS int64
+	// OK 这一步成功与否
+	OK bool
+	// OffsetMS 在录像里的位置（毫秒，-1 表示没有录像）
+	OffsetMS int64
+}
+
+func (m *Manager) writeEvent(ctx context.Context, id string, step Step, out eventOutcome) {
 	rawArgs, err := json.Marshal(step.Args)
 	if err != nil {
 		rawArgs = []byte(`{}`)
-	}
-	kind := step.Kind
-	if kind == "" {
-		kind = "action"
 	}
 	caption := step.Caption
 	if caption == "" {
 		caption = captionFor(step, nil)
 	}
 	// 记下写这条记录时窗口的矩形：记录按它裁剪片段，窗口中途变过也不会错位
-	m.mu.Lock()
 	frame := store.Rect{}
-	if live, ok := m.live[id]; ok {
+	if live, ok := m.liveOf(id); ok {
 		frame = live.session.Frame
 	}
-	m.mu.Unlock()
 
 	// 审计是旁路：写失败只告警，不影响工具本身的成败
 	if _, err := m.store.AppendEvent(ctx, store.Event{
-		SessionID: id, At: time.Now(), Tool: step.Tool, Args: rawArgs, OK: ok, Kind: kind,
+		SessionID: id, At: time.Now(), Tool: step.Tool, Args: rawArgs, OK: out.OK, Kind: step.Kind,
 		Caption: caption, Intent: step.Intent, Expect: step.Expect,
-		DurationMS: durationMS, VideoOffsetMS: offset, Result: truncate(result, 2000),
-		ArtifactPath: artifact, Shot: step.Shot, Frame: frame,
+		DurationMS: out.DurationMS, VideoOffsetMS: out.OffsetMS, Result: truncate(out.Result, 2000),
+		ArtifactPath: out.Artifact, Shot: step.Shot, Frame: frame,
 	}); err != nil {
 		m.log.Error("写审计事件失败", "session", id, "tool", step.Tool, "err", err)
 	}
@@ -704,40 +717,38 @@ func (m *Manager) writeEvent(ctx context.Context, id string, step Step, result, 
 //
 // 超时不是直接删容器：先走正常收尾（停录屏、归档录像），再标记 abandoned。
 func (m *Manager) Sweep(ctx context.Context) []string {
+	// 一次遍历同时得出两件事：该回收的、以及要巡检容器死活的。
+	// 分两趟加锁除了多写一遍遍历，还会让两趟看到的状态不是同一个瞬间。
+	now := time.Now()
 	m.mu.Lock()
-	ids := make([]string, 0, len(m.live))
-	for id, live := range m.live {
-		idleExpired := !live.session.IdleDeadline.IsZero() && time.Now().After(live.session.IdleDeadline)
-		lifetimeExpired := time.Since(live.session.StartedAt) > m.cfg.MaxLifetime
-		idleByActivity := time.Since(live.lastActivity) > m.cfg.IdleTimeout
-		if idleExpired || lifetimeExpired || idleByActivity {
-			ids = append(ids, id)
-		}
-	}
-	m.mu.Unlock()
-
-	// 顺便巡检容器是否还活着（外部 docker rm / OOM 不会通知我们）
-	m.mu.Lock()
+	expired := make([]string, 0, len(m.live))
 	aliveCheck := make([]string, 0, len(m.live))
 	for id, live := range m.live {
+		idleExpired := !live.session.IdleDeadline.IsZero() && now.After(live.session.IdleDeadline)
+		lifetimeExpired := now.Sub(live.session.StartedAt) > m.cfg.MaxLifetime
+		idleByActivity := now.Sub(live.lastActivity) > m.cfg.IdleTimeout
+		if idleExpired || lifetimeExpired || idleByActivity {
+			expired = append(expired, id)
+		}
 		if live.session.Status == store.StatusReady {
 			aliveCheck = append(aliveCheck, id)
 		}
 	}
 	m.mu.Unlock()
+
+	// 另外巡检容器是否还活着（外部 docker rm / OOM 不会通知我们）
 	for _, id := range aliveCheck {
 		m.checkContainerAlive(ctx, id)
 	}
 
-	reclaimed := make([]string, 0, len(ids))
-	for _, id := range ids {
+	reclaimed := make([]string, 0, len(expired))
+	for _, id := range expired {
 		m.log.Warn("会话超时，开始回收", "session", id)
 		if _, err := m.Stop(ctx, id, "", "会话超时被回收（可能客户端已断开）"); err != nil {
 			m.log.Error("回收会话失败", "session", id, "err", err)
 			continue
 		}
-		sess, err := m.store.GetSession(ctx, id)
-		if err == nil {
+		if sess, err := m.store.GetSession(ctx, id); err == nil {
 			sess.Status = store.StatusAbandoned
 			_ = m.store.UpdateSession(ctx, sess)
 		}
@@ -948,20 +959,14 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		// 只接管"明确就绪"的会话：starting/stopping 是上一个进程留下的半截状态，
 		// 接管它们要么白等端口，要么留下永远收不完的尾。
 		if sess.Status != store.StatusReady {
-			sess.Status = store.StatusFailed
-			sess.Error = fmt.Sprintf("控制面重启时该会话处于 %s 状态，已放弃接管", sess.Status)
-			sess.EndedAt = time.Now()
-			_ = m.store.UpdateSession(ctx, sess)
+			m.fail(ctx, sess, fmt.Sprintf("控制面重启时该会话处于 %s 状态，已放弃接管", sess.Status))
 			continue
 		}
 
 		// 容器没了就标记失败，别让它一直挂在"运行中"
 		state, err := m.docker.Inspect(ctx, "rigd-"+sess.ID)
 		if err != nil || !state.Running {
-			sess.Status = store.StatusFailed
-			sess.Error = "控制面重启时容器已不在运行"
-			sess.EndedAt = time.Now()
-			_ = m.store.UpdateSession(ctx, sess)
+			m.fail(ctx, sess, "控制面重启时容器已不在运行")
 			continue
 		}
 
@@ -979,10 +984,7 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 			}
 		} else {
 			m.log.Warn("接管会话时连接调试端口失败，会话标记为失败", "session", sess.ID, "err", dialErr)
-			sess.Status = store.StatusFailed
-			sess.Error = fmt.Sprintf("接管失败：%v", dialErr)
-			sess.EndedAt = time.Now()
-			_ = m.store.UpdateSession(ctx, sess)
+			m.fail(ctx, sess, fmt.Sprintf("接管失败：%v", dialErr))
 			continue
 		}
 		if ms, err := m.readRecordingStart(ctx, "rigd-"+sess.ID); err == nil {
@@ -1026,14 +1028,14 @@ func isTransportError(err error) bool {
 // dropInspector 丢掉缓存的检查器，下次使用时重新建连。
 func (m *Manager) dropInspector(id string) {
 	m.mu.Lock()
-	live, ok := m.live[id]
-	if ok {
+	if live, ok := m.live[id]; ok {
+		if live.inspector != nil {
+			_ = live.inspector.Close()
+		}
 		live.inspector = nil
 	}
 	m.mu.Unlock()
-	if ok && live != nil && live.inspector == nil {
-		m.log.Info("已清除失效的检查器连接", "session", id)
-	}
+	m.log.Info("已清除失效的检查器连接", "session", id)
 }
 
 // checkContainerAlive 巡检：容器没了就把会话收尾，避免"显示 ready 但点不动"。
@@ -1046,11 +1048,8 @@ func (m *Manager) checkContainerAlive(ctx context.Context, id string) {
 	if _, err := m.Stop(ctx, id, "", "容器意外退出，已自动收尾"); err != nil {
 		m.log.Error("自动收尾失败", "session", id, "err", err)
 	}
-	sess, getErr := m.store.GetSession(ctx, id)
-	if getErr == nil {
-		sess.Status = store.StatusFailed
-		sess.Error = "运行期间容器意外退出"
-		_ = m.store.UpdateSession(ctx, sess)
+	if sess, err := m.store.GetSession(ctx, id); err == nil {
+		m.fail(ctx, sess, "运行期间容器意外退出")
 	}
 }
 
@@ -1148,9 +1147,10 @@ func (m *Manager) syncFrame(ctx context.Context, id string, insp Inspector) {
 		Caption: fmt.Sprintf("窗口尺寸变化：%dx%d → %dx%d", prev.Width, prev.Height, frame.Width, frame.Height),
 	}
 	note.Shot = m.captureShot(ctx, id, sess.Dir, insp, note)
-	m.writeEvent(ctx, id, note, "应用自己调整了窗口尺寸，画面几何已更新", "", 0, true, m.NowOffset(id))
+	m.writeEvent(ctx, id, note, eventOutcome{
+		Result: "应用自己调整了窗口尺寸，画面几何已更新", OK: true, OffsetMS: m.NowOffset(id),
+	})
 	m.log.Info("窗口尺寸变化", "session", id,
 		"from", fmt.Sprintf("%dx%d", prev.Width, prev.Height),
 		"to", fmt.Sprintf("%dx%d", frame.Width, frame.Height))
 }
-
