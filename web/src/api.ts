@@ -43,7 +43,7 @@ export interface LogSource {
   bytes: number;
 }
 
-export type EventKind = 'action' | 'assert' | 'note';
+export type EventKind = 'action' | 'note';
 
 export interface SessionEvent {
   /** 这一段连续操作的起止（毫秒，相对录像起点）；同一批的几步共用一条片段 */
