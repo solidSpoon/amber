@@ -183,7 +183,6 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 	if label == "" {
 		label = filepath.Base(payload.Dir)
 	}
-	recipeJSON, _ := json.Marshal(payload.Recipe)
 	assetsJSON, _ := json.Marshal(opts.Assets)
 
 	sess := store.Session{
@@ -191,7 +190,6 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 		Title:     strings.TrimSpace(opts.Title),
 		App:       label,
 		Ref:       opts.Commit,
-		Image:     m.cfg.Image,
 		Status:    store.StatusStarting,
 		CDPPort:   cdpPort,
 		VNCPort:   vncPort,
@@ -199,7 +197,6 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 		Dir:       dir,
 		Payload:   opts.Payload,
 		Assets:    string(assetsJSON),
-		Recipe:    string(recipeJSON),
 		CreatedAt: time.Now(),
 	}
 	if err := m.store.CreateSession(ctx, sess); err != nil {

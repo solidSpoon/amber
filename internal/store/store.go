@@ -102,8 +102,6 @@ type Session struct {
 	Payload string
 	// Assets 素材槽位 → 来源（JSON），槽位由产物的 rig.json 声明
 	Assets string
-	// Recipe 产物自述（rig.json 的原文快照），记录里能看出当时怎么启动的
-	Recipe string
 	// Frame 录像里真正有内容的那块区域（= 应用窗口），零值表示未知。
 	// Display 它所在的虚拟屏；两者不同就说明录进去的桌面比窗口大。
 	Frame           Rect
@@ -312,14 +310,14 @@ func parseTime(v sql.NullString) time.Time {
 // CreateSession 写入一条新会话。
 func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions
-		(id, title, app, ref, image, container, status, cdp_port, vnc_port, slot, dir,
-		 payload, assets, recipe,
+		(id, title, app, ref, container, status, cdp_port, vnc_port, slot, dir,
+		 payload, assets,
 		 frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 		 created_at, started_at, ended_at, idle_deadline, video_duration_ms, verdict, summary, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sess.ID, sess.Title, sess.App, sess.Ref, sess.Image, sess.Container, string(sess.Status),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.ID, sess.Title, sess.App, sess.Ref, sess.Container, string(sess.Status),
 		sess.CDPPort, sess.VNCPort, sess.Slot, sess.Dir,
-		sess.Payload, sess.Assets, sess.Recipe,
+		sess.Payload, sess.Assets,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		sess.CreatedAt.UTC().Format(time.RFC3339Nano), formatTime(sess.StartedAt), formatTime(sess.EndedAt),
 		formatTime(sess.IdleDeadline), sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error)
@@ -333,13 +331,13 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET
 		container = ?, status = ?, cdp_port = ?, vnc_port = ?,
-		payload = ?, assets = ?, recipe = ?,
+		payload = ?, assets = ?,
 		frame_x = ?, frame_y = ?, frame_w = ?, frame_h = ?, display_w = ?, display_h = ?,
 		started_at = ?, ended_at = ?, idle_deadline = ?,
 		video_duration_ms = ?, verdict = ?, summary = ?, error = ?
 		WHERE id = ?`,
 		sess.Container, string(sess.Status), sess.CDPPort, sess.VNCPort,
-		sess.Payload, sess.Assets, sess.Recipe,
+		sess.Payload, sess.Assets,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		formatTime(sess.StartedAt), formatTime(sess.EndedAt), formatTime(sess.IdleDeadline),
 		sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error, sess.ID)
@@ -356,8 +354,8 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 // ErrNotFound 表示目标记录不存在。
 var ErrNotFound = errors.New("记录不存在")
 
-const sessionColumns = `id, title, app, ref, image, container, status, cdp_port, vnc_port, slot, dir,
-	payload, assets, recipe,
+const sessionColumns = `id, title, app, ref, container, status, cdp_port, vnc_port, slot, dir,
+	payload, assets,
 	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 	created_at, started_at, ended_at, idle_deadline, video_duration_ms, verdict, summary, error`
 
@@ -368,9 +366,9 @@ func scanSession(sc rowScanner) (Session, error) {
 		createdAt                        string
 		startedAt, endedAt, idleDeadline sql.NullString
 	)
-	err := sc.Scan(&sess.ID, &sess.Title, &sess.App, &sess.Ref, &sess.Image, &sess.Container, &status,
+	err := sc.Scan(&sess.ID, &sess.Title, &sess.App, &sess.Ref, &sess.Container, &status,
 		&sess.CDPPort, &sess.VNCPort, &sess.Slot, &sess.Dir,
-		&sess.Payload, &sess.Assets, &sess.Recipe,
+		&sess.Payload, &sess.Assets,
 		&sess.Frame.X, &sess.Frame.Y, &sess.Frame.Width, &sess.Frame.Height,
 		&sess.Display.Width, &sess.Display.Height,
 		&createdAt, &startedAt, &endedAt, &idleDeadline,
