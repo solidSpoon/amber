@@ -595,6 +595,26 @@ func (s *Store) ActiveSessionCount(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// ActiveSessionIDs 只取还没结束的会话 ID（进程退出时要挨个收尾）。
+func (s *Store) ActiveSessionIDs(ctx context.Context) ([]string, error) {
+	where, args := notTerminalFilter("status")
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM sessions WHERE `+where, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询活跃会话失败: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("扫描会话 ID 失败: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // ActiveSessions 返回所有非终态会话，供调度器做超时回收。
 func (s *Store) ActiveSessions(ctx context.Context) ([]Session, error) {
 	where, args := notTerminalFilter("status")

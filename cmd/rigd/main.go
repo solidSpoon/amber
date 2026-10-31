@@ -37,7 +37,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mcp", "", "以 MCP stdio 模式运行：可选值为空(FALSE)或 true")
+	mcpMode := flag.Bool("mcp", false, "以 MCP stdio 模式运行（stdio 上只说 MCP 协议，不启动 HTTP）")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -61,7 +61,7 @@ func main() {
 	docker := dockerx.NewCLI(cfg.DockerBin)
 	manager := session.NewManager(cfg, st, docker, nil, logger)
 
-	if *mode == "true" {
+	if *mcpMode {
 		runMCP(ctx, cfg, st, manager, logger)
 		return
 	}
@@ -82,43 +82,9 @@ func runMCP(ctx context.Context, cfg *config.Config, st *store.Store, manager *s
 // runHTTP 启动管理台：调度器扫超时、采样器采指标、HTTP 出接口与页面。
 func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *session.Manager, docker dockerx.Runner, logger *slog.Logger) {
 	// 接管历史会话放到后台：它要连 CDP，慢起来会拖住整个启动（HTTP 先能服务更重要）
-	go func() {
-		if n, err := manager.RecoverSessions(ctx); err != nil {
-			logger.Warn("接管历史会话失败", "err", err)
-		} else if n > 0 {
-			logger.Info("接管历史会话完成", "count", n)
-		}
-	}()
+	go recoverSessions(ctx, manager, logger)
 	go manager.RunSweeper(ctx, 30*time.Second)
 	go telemetry.NewSampler(st, docker, cfg.DataDir, logger).Run(ctx, cfg.SampleInterval)
-
-	webFS, err := fs.Sub(web.Dist, "dist")
-	if err != nil {
-		logger.Warn("前端资源不可用，只提供 API", "err", err)
-		webFS = nil
-	}
-
-	// MCP：HTTP 模式下同时挂一个 Streamable HTTP 接入点，并把连接信息交给页面展示。
-	// 工具清单来自服务自身的 tools/list，页面不会和实现漂移。
-	mcpServer := mcpserver.NewServer(manager, st, cfg, logger)
-	mcpTools, err := mcpserver.Catalog(ctx, mcpServer)
-	if err != nil {
-		logger.Warn("读取 MCP 工具清单失败，页面将不显示工具列表", "err", err)
-	}
-	mcpURL := fmt.Sprintf("http://%s/mcp", advertisedAddr(cfg.Addr))
-
-	api := httpapi.New(httpapi.Options{
-		Config: cfg, Store: st, Manager: manager, WebFS: webFS, Log: logger,
-		MCP: httpapi.MCPInfo{
-			HTTPURL: mcpURL, HTTPEnabled: true, Tools: mcpTools,
-			Command: []string{"rigd", "--mcp"},
-			Env: map[string]string{
-				"RIGD_DATA_DIR":        cfg.DataDir,
-				"RIGD_IMAGE":           cfg.Image,
-				"RIGD_WORKSPACE_ROOTS": strings.Join(cfg.WorkspaceRoots, ":"),
-			},
-		},
-	})
 
 	// 上次进程如果被强杀，会话目录里可能留着几百 MB 的产物快照；启动时清一遍。
 	if n, err := manager.CleanupSnapshots(context.Background()); err != nil {
@@ -126,35 +92,18 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 	} else if n > 0 {
 		logger.Info("已清理残留的产物快照", "count", n)
 	}
+	go sweepPayloads(ctx, st, cfg.PayloadTTL, logger)
 
-	// 产物回收：会话结束会立刻归还引用；这里兜住进程被杀、上传传一半留下的垃圾。
-	go func() {
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			freed, err := st.Sweep(context.Background(), cfg.PayloadTTL)
-			if err != nil {
-				logger.Warn("回收产物失败", "err", err)
-			} else if freed > 0 {
-				logger.Info("已回收无人引用的产物", "freed_mb", freed>>20)
-			}
-			<-ticker.C
-		}
-	}()
-
-	router := api.Handler()
-	mux := http.NewServeMux()
-	// 内网自用，不设令牌：边界在网络层，不在应用层
-	mux.Handle("/mcp", httpapi.NewMCPHandler(mcpServer))
-	mux.Handle("/mcp/", httpapi.NewMCPHandler(mcpServer))
-	mux.Handle("/", router)
+	api := httpapi.New(httpapi.Options{
+		Config: cfg, Store: st, Manager: manager, WebFS: webAssets(logger), Log: logger,
+		MCP: mcpInfo(ctx, cfg, st, manager, logger),
+	})
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           route(api, manager, st, cfg, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
 	go func() {
 		logger.Info("管理台已启动", "addr", cfg.Addr, "data", cfg.DataDir)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -170,26 +119,83 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 	_ = server.Shutdown(shutdownCtx)
 
 	// 退出前把仍在跑的会话正常收尾，别留下没人管的容器
-	for _, sess := range mustActive(st, logger) {
-		if _, err := manager.Stop(shutdownCtx, sess, "", "服务关闭时自动收尾"); err != nil {
-			logger.Warn("收尾会话失败", "session", sess, "err", err)
+	ids, err := st.ActiveSessionIDs(shutdownCtx)
+	if err != nil {
+		logger.Warn("读取活跃会话失败", "err", err)
+	}
+	for _, id := range ids {
+		if _, err := manager.Stop(shutdownCtx, id, "", "服务关闭时自动收尾"); err != nil {
+			logger.Warn("收尾会话失败", "session", id, "err", err)
 		}
 	}
 }
 
-func mustActive(st *store.Store, logger *slog.Logger) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	sessions, err := st.ActiveSessions(ctx)
+// route 把 MCP 接入点和管理台挂在同一个端口上。
+func route(api *httpapi.Server, manager *session.Manager, st *store.Store, cfg *config.Config, logger *slog.Logger) http.Handler {
+	mcpHandler := httpapi.NewMCPHandler(mcpserver.NewServer(manager, st, cfg, logger))
+	mux := http.NewServeMux()
+	// 内网自用，不设令牌：边界在网络层，不在应用层
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/mcp/", mcpHandler)
+	mux.Handle("/", api.Handler())
+	return mux
+}
+
+// mcpInfo 是「MCP」页要展示的连接信息：工具清单来自服务自身的 tools/list。
+func mcpInfo(ctx context.Context, cfg *config.Config, st *store.Store, manager *session.Manager, logger *slog.Logger) httpapi.MCPInfo {
+	mcpServer := mcpserver.NewServer(manager, st, cfg, logger)
+	tools, err := mcpserver.Catalog(ctx, mcpServer)
 	if err != nil {
-		logger.Warn("读取活跃会话失败", "err", err)
+		logger.Warn("读取 MCP 工具清单失败，页面将不显示工具列表", "err", err)
+	}
+	return httpapi.MCPInfo{
+		HTTPURL: fmt.Sprintf("http://%s/mcp", advertisedAddr(cfg.Addr)), HTTPEnabled: true, Tools: tools,
+		Command: []string{"rigd", "--mcp"},
+		Env: map[string]string{
+			"RIGD_DATA_DIR":        cfg.DataDir,
+			"RIGD_IMAGE":           cfg.Image,
+			"RIGD_WORKSPACE_ROOTS": strings.Join(cfg.WorkspaceRoots, ":"),
+		},
+	}
+}
+
+// webAssets 取内嵌的前端静态资源；拿不到就只提供 API。
+func webAssets(logger *slog.Logger) fs.FS {
+	webFS, err := fs.Sub(web.Dist, "dist")
+	if err != nil {
+		logger.Warn("前端资源不可用，只提供 API", "err", err)
 		return nil
 	}
-	ids := make([]string, 0, len(sessions))
-	for _, sess := range sessions {
-		ids = append(ids, sess.ID)
+	return webFS
+}
+
+func recoverSessions(ctx context.Context, manager *session.Manager, logger *slog.Logger) {
+	if n, err := manager.RecoverSessions(ctx); err != nil {
+		logger.Warn("接管历史会话失败", "err", err)
+	} else if n > 0 {
+		logger.Info("接管历史会话完成", "count", n)
 	}
-	return ids
+}
+
+// sweepPayloads 周期性回收没人引用的产物/素材，直到 ctx 取消。
+//
+// 会话结束会立刻归还引用，这里是兜底：进程被 kill、上传传一半都会留下垃圾。
+func sweepPayloads(ctx context.Context, st *store.Store, ttl time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		freed, err := st.Sweep(ctx, ttl)
+		if err != nil {
+			logger.Warn("回收产物失败", "err", err)
+		} else if freed > 0 {
+			logger.Info("已回收无人引用的产物", "freed_mb", freed>>20)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // advertisedAddr 把监听地址转成人能点开的地址。
