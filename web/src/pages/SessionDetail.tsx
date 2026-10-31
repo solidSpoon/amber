@@ -137,17 +137,25 @@ export default function SessionDetail({ id }: { id: string }) {
           </EmptyHeader>
         </Empty>
       ) : (
-        <ol className="flex flex-col">
-          {batchGroups(events).map((group) => (
-            <li key={group.start} className={group.start >= 0 ? 'border-l-2 border-border/60 pl-4' : 'pl-0'}>
-              {/* 一批 = 一次连续操作，只有一条片段；把它的几步归到一组，读者才看得出"这一段是一口气做的" */}
-              {group.start >= 0 && (
-                <div className="flex items-baseline gap-2 pt-4 text-[11px] text-muted-foreground/70">
-                  <span>连续 {group.events.length} 步</span>
-                  <span className="font-mono tabular-nums">{formatClock(group.start / 1000)}</span>
-                </div>
-              )}
-              <ol className="divide-y divide-border/50">
+        <ol className="flex flex-col gap-5">
+          {batchGroups(events).map((group, index) => (
+            <li key={group.start} className="rounded-lg border bg-card/40 p-4 sm:p-5">
+              {/* 一批 = 一次连续操作 = 一条片段，所以报告的基本单位是"这一批"，
+                  不是批里的某一步：批头写清这批干了什么，明细收在下面。 */}
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                  {String(index + 1).padStart(2, '0')}
+                </span>
+                <span className="text-sm font-medium">{summarizeBatch(group.events)}</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {group.events.length} 步
+                  <span className="mx-1">·</span>
+                  <span className="font-mono tabular-nums">
+                    {formatClock(Math.max(0, group.start) / 1000)}
+                  </span>
+                </span>
+              </div>
+              <ol className="mt-3 flex flex-col divide-y divide-border/40">
                 {group.events.map((event) => (
                   <StepRow
                     key={event.seq}
@@ -594,6 +602,14 @@ function LogPanel({ sessionId }: { sessionId: string }) {
   );
 }
 
+
+/** 一批的标题：用批里的动作名拼一句话，读者先看这句就够 */
+function summarizeBatch(events: SessionEvent[]): string {
+  const names = events.filter((e) => e.kind !== 'note').map((e) => e.caption.replace(/^点击 /, ''));
+  if (names.length === 0) return '一批操作';
+  const head = names.slice(0, 3).join(' → ');
+  return names.length > 3 ? `${head} 等 ${names.length} 个动作` : head;
+}
 
 /** 按「一段连续操作」分组：报告里同批的步骤归在一起，一批只有一条片段 */
 function batchGroups(events: SessionEvent[]): { start: number; events: SessionEvent[] }[] {

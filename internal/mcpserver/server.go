@@ -45,7 +45,7 @@ func NewServer(mgr *session.Manager, st *store.Store, log *slog.Logger) *mcp.Ser
 
 	registerSessionTools(server, s)
 	registerSnapshotTool(server, s)
-	registerRunTool(server, s)
+	registerActTool(server, s)
 	registerFeedbackTool(server, s)
 
 	return server
@@ -211,24 +211,24 @@ func registerSnapshotTool(server *mcp.Server, s *Server) {
 	})
 }
 
-func registerRunTool(server *mcp.Server, s *Server) {
+func registerActTool(server *mcp.Server, s *Server) {
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "run",
-		Description: "按顺序执行一串动作（steps 数组，1~50 步），中间不回到你这边；只做一件事就传一个只含一个元素的数组。" +
+		Name: "act",
+		Description: "执行一串动作（steps 数组，1~50 步），并返回执行完之后的界面（一帧画面 + 可操作元素表）；" +
+			"只做一件事就传一个只含一个元素的数组。" +
+			"这一串中间不回到你这边，所以有时效性要求的连招靠它：拖到第 6 秒立刻悬停/断言，不会隔着你思考的那几十秒。" +
 			"动作：click 点元素（ref 或 match 文字或 selector）/ " +
 			"hover 把鼠标停在元素上（悬停才出现的浮层，如词典）/ fill 覆盖填写输入框 / " +
 			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立 / assert 记一条断言。" +
 			"press 和 type 走真实键盘输入，页面和原生对话框都收得到。" +
-			"跑完自动附上当前界面（一帧画面 + 可操作元素），不用再单独看一次；" +
-			"取画面之前会按 settleMs 等界面响应（默认 400ms）——最后一步是点击/跳转的话，" +
-			"建议把 settleMs 调大，或者干脆用一步 wait 收尾，让界面先稳定下来。" +
-			"时效性靠它保证：拖到第 6 秒立刻悬停/断言，两步之间不会隔着你思考的那几十秒。" +
+			"建议最后一步用 wait 收尾：界面要加载、要动画的时候，动作刚发出去界面还没稳定，" +
+			"这时立刻返回的画面会是中间状态，读者看到的就不是这一步的结果。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
 			"每一步都会在验收报告里各记一条，当作独立的一步来读。",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args runArgs) (*mcp.CallToolResult, runResult, error) {
-		msg, res, err := s.doRun(ctx, args)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args actArgs) (*mcp.CallToolResult, actResult, error) {
+		msg, res, err := s.doAct(ctx, args)
 		if err != nil {
-			return nil, runResult{}, err
+			return nil, actResult{}, err
 		}
 		// 跑完的界面：先给图（模型看状态靠它），再给需要时截的图
 		out := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
@@ -271,16 +271,15 @@ type waitArgs struct {
 	TimeoutMS int    `json:"timeoutMs,omitempty" jsonschema:"最长等多久（毫秒），默认 5000，最大 60000"`
 }
 
-type runArgs struct {
+type actArgs struct {
 	SessionID string      `json:"sessionId" jsonschema:"会话 ID"`
 	Steps     []batchStep `json:"steps" jsonschema:"按顺序执行的步骤（1~50 步）；只做一个动作就传一个元素的数组"`
-	SettleMS  int         `json:"settleMs,omitempty" jsonschema:"跑完后等界面响应多久再取画面，默认 400，最大 5000"`
 }
 
-// runResult 给客户端的结构化结果：每一步的成败、元素表、求值结果。
-type runResult struct {
+// actResult 给客户端的结构化结果：每一步的成败、元素表、求值结果。
+type actResult struct {
 	OK        bool            `json:"ok"`
-	Steps     []runStepResult `json:"steps"`
+	Steps     []actStepResult `json:"steps"`
 	StoppedAt int             `json:"stoppedAt,omitempty"`
 	// Elements 跑完之后界面上的可操作元素（模型接着点要用）
 	Elements []inspect.Element `json:"elements,omitempty"`
@@ -288,7 +287,7 @@ type runResult struct {
 	After []byte `json:"-"`
 }
 
-type runStepResult struct {
+type actStepResult struct {
 	Index    int               `json:"index"`
 	Action   string            `json:"action"`
 	OK       bool              `json:"ok"`
