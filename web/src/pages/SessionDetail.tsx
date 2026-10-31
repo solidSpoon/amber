@@ -21,7 +21,9 @@ export default function SessionDetail({ id }: { id: string }) {
   const [session, setSession] = useState<Session | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [error, setError] = useState('');
-  const [zoomed, setZoomed] = useState<SessionEvent | null>(null);
+  // 放大态记的是「点了哪一张」，不是「哪一步」：同一步既有截图也有片段，
+  // 只按事件判断的话，点截图会弹出片段。
+  const [zoomed, setZoomed] = useState<ZoomTarget | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,11 +142,19 @@ export default function SessionDetail({ id }: { id: string }) {
       </details>
 
       {zoomed && (
-        <Lightbox sessionId={session.id} event={zoomed} display={session.display} onClose={() => setZoomed(null)} />
+        <Lightbox
+          sessionId={session.id}
+          target={zoomed}
+          display={session.display}
+          onClose={() => setZoomed(null)}
+        />
       )}
     </div>
   );
 }
+
+/** 放大的对象：截图和片段是两样东西，点哪张就放大哪张 */
+type ZoomTarget = { event: SessionEvent; kind: 'shot' | 'clip' };
 
 /**
  * 画面外框：点开看大图的那层壳，所有画面都走它，样式只写一份。
@@ -263,18 +273,19 @@ function ShotTile({
   );
 }
 
-/** 放大：整段 4 秒带控件播放，Esc 或点背景关闭 */
+/** 放大：截图就是那张图，片段才播放；Esc 或点背景关闭 */
 function Lightbox({
   sessionId,
-  event,
+  target,
   display,
   onClose,
 }: {
   sessionId: string;
-  event: SessionEvent;
+  target: ZoomTarget;
   display?: Session['display'];
   onClose: () => void;
 }) {
+  const { event, kind } = target;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -288,7 +299,7 @@ function Lightbox({
       className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-neutral-950/85 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
-      {event.clip ? (
+      {kind === 'clip' && event.clip ? (
         <div className="w-[min(90vw,1100px)]" onClick={(e) => e.stopPropagation()}>
           <ScreenStage display={display}>
             <video
@@ -305,7 +316,8 @@ function Lightbox({
         <img
           src={`/api/sessions/${sessionId}/artifacts/${event.shot}`}
           alt={event.caption}
-          className="max-h-[80vh] w-auto max-w-full rounded-md"
+          className="max-h-[86vh] w-auto max-w-full rounded-md"
+          onClick={(e) => e.stopPropagation()}
         />
       ) : null}
       <p className="max-w-xl text-center text-xs text-neutral-300">
@@ -421,7 +433,7 @@ function BatchRow({
   sessionId: string;
   group: { start: number; events: SessionEvent[] };
   display?: Session['display'];
-  onZoom: (event: SessionEvent) => void;
+  onZoom: (target: ZoomTarget) => void;
 }) {
   const failed = group.events.filter((e) => !e.ok);
   // 一批只放一条录像片段：批内相邻两步可能只隔 0.2 秒，逐行放就成了同一段画面循环十几遍。
@@ -472,7 +484,7 @@ function BatchRow({
                 key={event.seq}
                 sessionId={sessionId}
                 event={event}
-                onZoom={() => onZoom(event)}
+                onZoom={() => onZoom({ event, kind: 'shot' })}
               />
             ))}
           </div>
@@ -485,7 +497,7 @@ function BatchRow({
             sessionId={sessionId}
             event={clipEvent}
             display={display}
-            onZoom={() => onZoom(clipEvent)}
+            onZoom={() => onZoom({ event: clipEvent, kind: 'clip' })}
           />
         )}
       </div>
