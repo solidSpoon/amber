@@ -23,8 +23,9 @@ import (
 )
 
 // doSnapshot 读页面结构。
-func (s *Server) doSnapshot(ctx context.Context, a sessionArgs) (inspect.Snapshot, error) {
+func (s *Server) doSnapshot(ctx context.Context, a sessionArgs) (inspect.Snapshot, []byte, error) {
 	var snap inspect.Snapshot
+	var shot []byte
 	_, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "snapshot", Args: map[string]any{}, Intent: a.Intent, Expect: a.Expect,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
@@ -33,12 +34,20 @@ func (s *Server) doSnapshot(ctx context.Context, a sessionArgs) (inspect.Snapsho
 			return "", "", err
 		}
 		snap = got
+		// 顺手取一帧画面：看结构能知道"有什么"，看画面才知道"长什么样"
+		if previewer, ok := insp.(interface {
+			PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
+		}); ok {
+			if raw, err := previewer.PreviewJPEG(ctx, 70); err == nil {
+				shot = raw
+			}
+		}
 		return inspect.Summarize(got), "", nil
 	})
 	if err != nil {
-		return inspect.Snapshot{}, err
+		return inspect.Snapshot{}, nil, err
 	}
-	return snap, nil
+	return snap, shot, nil
 }
 
 // doScreenshot 截一张证据图，返回相对路径与字节数。
@@ -307,6 +316,9 @@ type stepExtra struct {
 	Text     string
 	Elements []inspect.Element
 	Value    any
+	// Image 随结果带回给模型的画面（JPEG）。UI 验收只看元素树是不够的：
+	// 布局错位、空白页、样式崩了，都只有画面能看出来。
+	Image []byte
 }
 
 // runStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
@@ -314,12 +326,12 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 	base := stepArgs{Intent: st.Intent, Expect: st.Expect}
 	switch st.Action {
 	case "snapshot":
-		snap, err := s.doSnapshot(ctx, sessionArgs{SessionID: sid, stepArgs: base})
+		snap, shot, err := s.doSnapshot(ctx, sessionArgs{SessionID: sid, stepArgs: base})
 		if err != nil {
 			return "", stepExtra{}, err
 		}
 		return fmt.Sprintf("读到 %d 个可操作元素", len(snap.Elements)), stepExtra{
-			Text: inspect.Summarize(snap), Elements: snap.Elements,
+			Text: inspect.Summarize(snap), Elements: snap.Elements, Image: shot,
 		}, nil
 	case "click":
 		msg, err := s.doClick(ctx, clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y})
@@ -444,7 +456,7 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 			b.WriteString("\n")
 		}
 		res.Steps = append(res.Steps, runStepResult{
-			Index: i + 1, Action: st.Action, OK: true, Text: msg, Elements: extra.Elements, Value: extra.Value,
+			Index: i + 1, Action: st.Action, OK: true, Text: msg, Elements: extra.Elements, Value: extra.Value, Image: extra.Image,
 		})
 	}
 	if len(a.Steps) == 1 {

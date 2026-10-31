@@ -207,14 +207,20 @@ func registerRunTool(server *mcp.Server, s *Server) {
 			return nil, runResult{}, err
 		}
 		out := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
-		// 截图类动作把图带上（限 3 张）：没有图，模型只能靠猜画面长什么样
+		// 把画面带上（最多 3 张）：验证 UI 不能只看元素树——布局错位、空白页、
+		// 样式崩了，都只有画面能看出来。snapshot 自带一帧，截图动作带它截的那张。
 		for _, r := range res.Steps {
-			if r.Action != "screenshot" || len(out.Content) >= 4 {
-				continue
+			if len(out.Content) >= 4 {
+				break
 			}
-			if path, ok := r.Value.(string); ok && path != "" {
-				if raw, err := os.ReadFile(filepath.Join(mustSessionDir(ctx, s, args.SessionID), path)); err == nil {
-					out.Content = append(out.Content, &mcp.ImageContent{Data: raw, MIMEType: "image/png"})
+			switch {
+			case len(r.Image) > 0:
+				out.Content = append(out.Content, &mcp.ImageContent{Data: r.Image, MIMEType: "image/jpeg"})
+			case r.Action == "screenshot":
+				if path, ok := r.Value.(string); ok && path != "" {
+					if raw, err := os.ReadFile(filepath.Join(mustSessionDir(ctx, s, args.SessionID), path)); err == nil {
+						out.Content = append(out.Content, &mcp.ImageContent{Data: raw, MIMEType: "image/png"})
+					}
 				}
 			}
 		}
@@ -256,6 +262,8 @@ type runStepResult struct {
 	Text     string            `json:"text"`
 	Elements []inspect.Element `json:"elements,omitempty"`
 	Value    any               `json:"value,omitempty"`
+	// Image 随结果带回给模型的画面（不进 JSON，避免 base64 塞进结构化结果）
+	Image []byte `json:"-"`
 }
 
 type feedbackArgs struct {
