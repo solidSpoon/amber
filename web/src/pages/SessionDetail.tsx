@@ -328,6 +328,9 @@ function StepMedia({
       {showClip ? (
         <ScreenStage display={display} className="rounded-none border-0">
           <video
+            // key 带上 seq：不然 React 会复用同一个 video 元素，
+            // 切换批次时还放着上一段的画面
+            key={`clip-${event.seq}`}
             ref={ref}
             src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
             muted
