@@ -44,6 +44,7 @@ func NewServer(mgr *session.Manager, st *store.Store, log *slog.Logger) *mcp.Ser
 	}, nil)
 
 	registerSessionTools(server, s)
+	registerSnapshotTool(server, s)
 	registerRunTool(server, s)
 	registerFeedbackTool(server, s)
 
@@ -190,11 +191,31 @@ type stepArgs struct {
 	Expect string `json:"expect,omitempty" jsonschema:"期望看到什么（会写进报告，方便对照实际结果）"`
 }
 
+// registerSnapshotTool 单独一个「看一眼」：run 结束会自动带当前界面，
+// 但那是顺带给的、不进报告；要把它记成一步证据时，显式调这个。
+func registerSnapshotTool(server *mcp.Server, s *Server) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "snapshot",
+		Description: "看一眼当前界面，并把这一眼记成报告里的一步：返回可操作元素（带引用号）+ 一张画面。" +
+			"run 结束会自动带当前界面，所以只有「这一步值得单独留证」时才需要它。",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sessionArgs) (*mcp.CallToolResult, snapshotResult, error) {
+		snap, shot, err := s.doSnapshot(ctx, args)
+		if err != nil {
+			return nil, snapshotResult{}, err
+		}
+		out := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: inspect.Summarize(snap)}}}
+		if len(shot) > 0 {
+			out.Content = append(out.Content, &mcp.ImageContent{Data: shot, MIMEType: "image/jpeg"})
+		}
+		return out, snapshotResult{URL: snap.URL, Title: snap.Title, Elements: snap.Elements, Text: snap.Text}, nil
+	})
+}
+
 func registerRunTool(server *mcp.Server, s *Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "run",
 		Description: "按顺序执行一串动作（steps 数组，1~50 步），中间不回到你这边；只做一件事就传一个只含一个元素的数组。" +
-			"动作：snapshot 看当前界面（元素树 + 一张画面）/ click 点元素（ref 或 match 文字或 selector）/ " +
+			"动作：click 点元素（ref 或 match 文字或 selector）/ " +
 			"hover 把鼠标停在元素上（悬停才出现的浮层，如词典）/ fill 覆盖填写输入框 / " +
 			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立 / assert 记一条断言。" +
 			"press 和 type 走真实键盘输入，页面和原生对话框都收得到。" +

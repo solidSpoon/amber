@@ -282,7 +282,7 @@ const (
 // 故意做成扁平结构而不是嵌套 JSON：模型写错一层就整个批跑不了，
 // 扁平至少能一眼看出哪一项写错了。
 type batchStep struct {
-	Action string `json:"action" jsonschema:"动作：snapshot/click/hover/fill/press/type/eval/wait/assert"`
+	Action string `json:"action" jsonschema:"动作：click/hover/fill/press/type/eval/wait/assert"`
 	stepArgs
 
 	Ref       string  `json:"ref,omitempty"`
@@ -325,14 +325,6 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 	point := clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y}
 
 	switch st.Action {
-	case "snapshot":
-		snap, shot, err := s.doSnapshot(ctx, sessionArgs{SessionID: sid, stepArgs: base})
-		if err != nil {
-			return "", stepExtra{}, err
-		}
-		return fmt.Sprintf("读到 %d 个可操作元素", len(snap.Elements)), stepExtra{
-			Text: inspect.Summarize(snap), Elements: snap.Elements, Image: shot,
-		}, nil
 	case "click":
 		msg, err := s.doClick(ctx, point)
 		return msg, stepExtra{}, err
@@ -369,7 +361,7 @@ func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string,
 		}
 		return "断言已记录 ❌：" + st.Claim, stepExtra{}, nil
 	default:
-		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：snapshot/click/hover/fill/press/type/eval/wait/assert）", st.Action)
+		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：click/hover/fill/press/type/eval/wait/assert）", st.Action)
 	}
 }
 
@@ -436,16 +428,6 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 // 不做的话，模型跑完一批还得再调一次 snapshot 才知道结果——又是一次往返，
 // 正好把批的意义抵消掉。这里不记步骤：它不是这次操作的一部分，是把结果给模型看。
 func (s *Server) attachCurrent(ctx context.Context, sid string, steps []batchStep, b *strings.Builder, res *runResult) {
-	// 最后一步已经是 snapshot 的话别重复取，直接把它那份提上来
-	if len(steps) > 0 && steps[len(steps)-1].Action == "snapshot" {
-		if n := len(res.Steps); n > 0 {
-			res.Elements = res.Steps[n-1].Elements
-			res.After = res.Steps[n-1].Image
-			// 提上来就够了，别在步骤里再带一份
-			res.Steps[n-1].Image = nil
-		}
-		return
-	}
 	insp, err := s.manager.Inspector(ctx, sid)
 	if err != nil {
 		return
