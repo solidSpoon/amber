@@ -107,13 +107,23 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "amber_stop",
-		Description: "结束会话：停录屏、归档每批的画面片段与截图、销毁容器。" +
-			"verdict 填 pass/fail/inconclusive，summary 写一句话结论（会显示在记录顶部）。",
+		Description: "结束会话：停容器（让容器内录屏正常收尾）、把每一批的画面切成片段、" +
+			"归档截图与日志、销毁容器。" +
+			"\n\n" +
+			"verdict 是这次验收的结论，三选一：pass（通过）/ fail（没通过）/ inconclusive（证据不足，看不出）。" +
+			"它会显示在记录顶部和会话列表里，是读者第一眼看的东西。" +
+			"summary 是一句话结论：说清凭什么 pass 或 fail，读者据此决定要不要点进记录。" +
+			"两个都可以不填——不填就只是结束会话，记录里没有结论（列表里也就不显示判定）。",
+		InputSchema: stopInputSchema(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args endArgs) (*mcp.CallToolResult, endResult, error) {
 		if strings.TrimSpace(args.SessionID) == "" {
 			return nil, endResult{}, errors.New("sessionId 不能为空")
 		}
-		sess, err := s.manager.Stop(ctx, args.SessionID, args.Verdict, args.Summary)
+		verdict, err := normalizeVerdict(args.Verdict)
+		if err != nil {
+			return nil, endResult{}, err
+		}
+		sess, err := s.manager.Stop(ctx, args.SessionID, verdict, strings.TrimSpace(args.Summary))
 		if err != nil {
 			return nil, endResult{}, err
 		}
@@ -156,8 +166,31 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 
 type endArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
-	Verdict   string `json:"verdict,omitempty" jsonschema:"pass / fail / inconclusive"`
-	Summary   string `json:"summary,omitempty" jsonschema:"一句话结论"`
+	// Verdict 这次验收的结论：pass / fail / inconclusive（见 verdictValues）
+	Verdict string `json:"verdict,omitempty" jsonschema:"结论：pass（通过）/ fail（没通过）/ inconclusive（看不出）"`
+	// Summary 一句话结论：凭什么 pass 或 fail
+	Summary string `json:"summary,omitempty" jsonschema:"一句话结论：说清凭什么，会显示在记录顶部"`
+}
+
+// verdictValues 是结论的三个合法取值，schema 的 enum 和自检都从这里来。
+//
+// 以前这里只是个自由字符串：写成 "passed" / "PASS" 也能存进库，
+// 而界面只认这三个值，于是结论徽章静默消失——看不到任何报错，结论就是没了。
+var verdictValues = []string{"pass", "fail", "inconclusive"}
+
+// normalizeVerdict 收下大小写/前后空格的差异，其余一律报错并列出可选值。
+func normalizeVerdict(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "", nil
+	}
+	for _, allowed := range verdictValues {
+		if value == allowed {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("verdict 只能是 %s（收到 %q）；没有结论就不填",
+		strings.Join(verdictValues, " / "), raw)
 }
 
 type endResult struct {
@@ -256,6 +289,28 @@ func registerActTool(server *mcp.Server, s *Server) {
 		}
 		return out, res, nil
 	})
+}
+
+// stopInputSchema 在推断出来的 schema 上给 verdict 补枚举：写错了当场被拒，
+// 而不是存进库、界面上静默不显示。
+func stopInputSchema() *jsonschema.Schema {
+	schema, err := jsonschema.For[endArgs](nil)
+	if err != nil {
+		panic(fmt.Sprintf("推断 stop 的输入 schema 失败: %v", err))
+	}
+	if verdict, ok := schema.Properties["verdict"]; ok {
+		verdict.Enum = verdictEnums()
+		verdict.Description = "结论：" + strings.Join(verdictValues, " / ") + "；没有结论就不填"
+	}
+	return schema
+}
+
+func verdictEnums() []any {
+	out := make([]any, 0, len(verdictValues))
+	for _, value := range verdictValues {
+		out = append(out, value)
+	}
+	return out
 }
 
 // runInputSchema 在推断出来的 schema 上补两样东西：action 的取值清单、
