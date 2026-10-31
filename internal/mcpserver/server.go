@@ -72,7 +72,7 @@ type startResult struct {
 func registerSessionTools(server *mcp.Server, s *Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "start_session",
-		Description: "申请一台一次性测试机：拉起容器、构建并启动被测应用、开始全程录屏。" +
+		Description: "申请一台一次性测试机：拉起容器、启动被测应用、开始全程录屏。" +
 			"返回 sessionId，之后所有操作都要带上它。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args startArgs) (*mcp.CallToolResult, startResult, error) {
 		if strings.TrimSpace(args.Payload) == "" {
@@ -99,8 +99,8 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "end_session",
-		Description: "结束会话：停止录屏、归档录像与截图、销毁容器。" +
-			"verdict 填 pass/fail/inconclusive，findings 写清依据，报告会带上它们。",
+		Description: "结束会话：停录屏、归档录像与截图、销毁容器。" +
+			"verdict 填 pass/fail/inconclusive，summary 写一句话结论（会显示在报告顶部）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args endArgs) (*mcp.CallToolResult, endResult, error) {
 		if strings.TrimSpace(args.SessionID) == "" {
 			return nil, endResult{}, errors.New("sessionId 不能为空")
@@ -198,7 +198,8 @@ func registerRunTool(server *mcp.Server, s *Server) {
 			"hover 把鼠标停在元素上（悬停才出现的浮层，如词典）/ fill 覆盖填写输入框 / " +
 			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立 / assert 记一条断言。" +
 			"press 和 type 走真实键盘输入，页面和原生对话框都收得到。" +
-			"时效性靠它保证：拖到第 6 秒立刻截一张，两步之间不会隔着你思考的那几十秒。" +
+			"跑完自动附上当前界面（一帧画面 + 可操作元素），不用再单独看一次。" +
+			"时效性靠它保证：拖到第 6 秒立刻悬停/断言，两步之间不会隔着你思考的那几十秒。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
 			"每一步都会在验收报告里各记一条，当作独立的一步来读。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args runArgs) (*mcp.CallToolResult, runResult, error) {
