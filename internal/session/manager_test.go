@@ -322,11 +322,11 @@ func TestStopFinalizesSessionAndDropsRecording(t *testing.T) {
 		t.Fatalf("写元信息失败: %v", err)
 	}
 
-	done, err := m.Stop(ctx, sess.ID, "pass", "字幕与画面一致")
+	done, err := m.Stop(ctx, sess.ID)
 	if err != nil {
 		t.Fatalf("收尾失败: %v", err)
 	}
-	if done.Status != store.StatusFinished || done.Verdict != "pass" {
+	if done.Status != store.StatusFinished {
 		t.Fatalf("收尾结果不对: %+v", done)
 	}
 	if done.VideoDurationMS != 42500 {
@@ -386,10 +386,10 @@ func TestStopIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("起会话失败: %v", err)
 	}
-	if _, err := m.Stop(ctx, sess.ID, "pass", "ok"); err != nil {
+	if _, err := m.Stop(ctx, sess.ID); err != nil {
 		t.Fatalf("第一次收尾失败: %v", err)
 	}
-	if _, err := m.Stop(ctx, sess.ID, "", ""); err != nil {
+	if _, err := m.Stop(ctx, sess.ID); err != nil {
 		t.Fatalf("重复收尾应成功: %v", err)
 	}
 }

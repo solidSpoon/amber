@@ -443,10 +443,19 @@ func (m *Manager) recordGeometry(ctx context.Context, sess store.Session, contai
 	return sess
 }
 
-// Stop 收尾会话：停容器（让容器内录屏正常收尾）→ 归档产物 → 写结论。
+// Stop 收尾会话：停容器（让容器内录屏正常收尾）→ 切片段 → 归档。
 //
-// verdict/summary 由调用方给（外部 AI 的结论）；为空时状态仍是 finished，只是没有判定。
-func (m *Manager) Stop(ctx context.Context, id, verdict, summary string) (store.Session, error) {
+// 这里没有"结论"这种参数：记录的职责是呈现发生了什么，谁觉得这次够不够格，
+// 由读记录的人自己决定。
+func (m *Manager) Stop(ctx context.Context, id string) (store.Session, error) {
+	return m.StopWithNote(ctx, id, "")
+}
+
+// StopWithNote 与 Stop 相同，另外写一句"这次是怎么结束的"。
+//
+// 只有服务端自己收尾时才会用（超时回收、进程退出、容器意外死掉）：
+// 那不是结论，是读者需要知道的事实——为什么这次会话没有走到最后一步。
+func (m *Manager) StopWithNote(ctx context.Context, id, note string) (store.Session, error) {
 	live, ok := m.liveOf(id)
 	if !ok {
 		// 不在内存里：可能已被超时回收或进程重启，回落到库里的记录
@@ -457,7 +466,7 @@ func (m *Manager) Stop(ctx context.Context, id, verdict, summary string) (store.
 		if sess.Status.Terminal() {
 			return sess, nil
 		}
-		return m.finalize(ctx, sess, verdict, summary)
+		return m.finalize(ctx, sess, note)
 	}
 
 	sess := live.session
@@ -485,18 +494,15 @@ func (m *Manager) Stop(ctx context.Context, id, verdict, summary string) (store.
 	delete(m.live, id)
 	m.mu.Unlock()
 
-	return m.finalize(ctx, sess, verdict, summary)
+	return m.finalize(ctx, sess, note)
 }
 
-// finalize 收尾的公共部分：读录像元信息、登记产物、落库。
-func (m *Manager) finalize(ctx context.Context, sess store.Session, verdict, summary string) (store.Session, error) {
+// finalize 收尾的公共部分：读录像元信息、切片段、落库。
+func (m *Manager) finalize(ctx context.Context, sess store.Session, note string) (store.Session, error) {
 	sess.Status = store.StatusFinished
 	sess.EndedAt = time.Now()
-	if verdict != "" {
-		sess.Verdict = verdict
-	}
-	if summary != "" {
-		sess.Summary = summary
+	if note != "" {
+		sess.Note = note
 	}
 
 	m.releaseSources(ctx, sess)
@@ -525,7 +531,7 @@ func (m *Manager) finalize(ctx context.Context, sess store.Session, verdict, sum
 	if err := m.store.UpdateSession(ctx, sess); err != nil {
 		return sess, err
 	}
-	m.log.Info("会话收尾完成", "session", sess.ID, "verdict", sess.Verdict, "duration_ms", sess.VideoDurationMS)
+	m.log.Info("会话收尾完成", "session", sess.ID, "duration_ms", sess.VideoDurationMS)
 	return sess, nil
 }
 
@@ -578,7 +584,7 @@ func (m *Manager) Sweep(ctx context.Context) []string {
 	reclaimed := make([]string, 0, len(expired))
 	for _, id := range expired {
 		m.log.Warn("会话超时，开始回收", "session", id)
-		if _, err := m.Stop(ctx, id, "", "会话超时被回收（可能客户端已断开）"); err != nil {
+		if _, err := m.StopWithNote(ctx, id, "会话超时被回收（可能客户端已断开）"); err != nil {
 			m.log.Error("回收会话失败", "session", id, "err", err)
 			continue
 		}
@@ -780,7 +786,7 @@ func (m *Manager) checkContainerAlive(ctx context.Context, id string) {
 		return
 	}
 	m.log.Warn("容器已不在运行，自动收尾会话", "session", id)
-	if _, err := m.Stop(ctx, id, "", "容器意外退出，已自动收尾"); err != nil {
+	if _, err := m.StopWithNote(ctx, id, "容器意外退出，已自动收尾"); err != nil {
 		m.log.Error("自动收尾失败", "session", id, "err", err)
 	}
 	if sess, err := m.store.GetSession(ctx, id); err == nil {

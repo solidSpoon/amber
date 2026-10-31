@@ -111,9 +111,10 @@ type Session struct {
 	EndedAt         time.Time
 	IdleDeadline    time.Time
 	VideoDurationMS int64
-	Verdict         string
-	Summary         string
-	Error           string
+	// Note 会话是怎么结束的（服务端写的一句话，如"会话超时被回收"）。
+	// 它不是本次验收的结论：这个工具只呈现发生了什么，不替人下判断。
+	Note  string
+	Error string
 }
 
 // Event 一次工具调用（审计记录的最小单元）。
@@ -313,14 +314,14 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 		(id, title, app, ref, container, status, cdp_port, vnc_port, slot, dir,
 		 payload, assets,
 		 frame_x, frame_y, frame_w, frame_h, display_w, display_h,
-		 created_at, started_at, ended_at, idle_deadline, video_duration_ms, verdict, summary, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 created_at, started_at, ended_at, idle_deadline, video_duration_ms, note, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.Title, sess.App, sess.Ref, sess.Container, string(sess.Status),
 		sess.CDPPort, sess.VNCPort, sess.Slot, sess.Dir,
 		sess.Payload, sess.Assets,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		sess.CreatedAt.UTC().Format(time.RFC3339Nano), formatTime(sess.StartedAt), formatTime(sess.EndedAt),
-		formatTime(sess.IdleDeadline), sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error)
+		formatTime(sess.IdleDeadline), sess.VideoDurationMS, sess.Note, sess.Error)
 	if err != nil {
 		return fmt.Errorf("写入会话失败: %w", err)
 	}
@@ -334,13 +335,13 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 		payload = ?, assets = ?,
 		frame_x = ?, frame_y = ?, frame_w = ?, frame_h = ?, display_w = ?, display_h = ?,
 		started_at = ?, ended_at = ?, idle_deadline = ?,
-		video_duration_ms = ?, verdict = ?, summary = ?, error = ?
+		video_duration_ms = ?, note = ?, error = ?
 		WHERE id = ?`,
 		sess.Container, string(sess.Status), sess.CDPPort, sess.VNCPort,
 		sess.Payload, sess.Assets,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		formatTime(sess.StartedAt), formatTime(sess.EndedAt), formatTime(sess.IdleDeadline),
-		sess.VideoDurationMS, sess.Verdict, sess.Summary, sess.Error, sess.ID)
+		sess.VideoDurationMS, sess.Note, sess.Error, sess.ID)
 	if err != nil {
 		return fmt.Errorf("更新会话失败: %w", err)
 	}
@@ -357,7 +358,7 @@ var ErrNotFound = errors.New("记录不存在")
 const sessionColumns = `id, title, app, ref, container, status, cdp_port, vnc_port, slot, dir,
 	payload, assets,
 	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
-	created_at, started_at, ended_at, idle_deadline, video_duration_ms, verdict, summary, error`
+	created_at, started_at, ended_at, idle_deadline, video_duration_ms, note, error`
 
 func scanSession(sc rowScanner) (Session, error) {
 	var (
@@ -372,7 +373,7 @@ func scanSession(sc rowScanner) (Session, error) {
 		&sess.Frame.X, &sess.Frame.Y, &sess.Frame.Width, &sess.Frame.Height,
 		&sess.Display.Width, &sess.Display.Height,
 		&createdAt, &startedAt, &endedAt, &idleDeadline,
-		&sess.VideoDurationMS, &sess.Verdict, &sess.Summary, &sess.Error)
+		&sess.VideoDurationMS, &sess.Note, &sess.Error)
 	if err != nil {
 		return Session{}, err
 	}

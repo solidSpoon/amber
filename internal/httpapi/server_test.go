@@ -188,11 +188,12 @@ func TestCreateListStopSession(t *testing.T) {
 		t.Fatalf("列表应有 1 个会话，实际 %d", len(sessions))
 	}
 
-	resp, stopped := postJSON(t, srv.URL+"/api/sessions/"+id+"/stop", map[string]any{"verdict": "pass", "summary": "ok"})
+	// 强制回收不带任何结论参数：控制台只负责把机器收回来
+	resp, stopped := postJSON(t, srv.URL+"/api/sessions/"+id+"/stop", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("停止会话期望 200，实际 %d", resp.StatusCode)
 	}
-	if stopped["status"] != string(store.StatusFinished) || stopped["verdict"] != "pass" {
+	if stopped["status"] != string(store.StatusFinished) {
 		t.Fatalf("收尾结果不对: %v", stopped)
 	}
 }

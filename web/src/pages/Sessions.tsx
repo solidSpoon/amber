@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { PageHeader } from '@/components/page-header';
-import { StatusBadge, VerdictBadge } from '@/components/session-badges';
+import { StatusBadge } from '@/components/session-badges';
 import { api, formatAgo, type Session } from '../api';
 
 /** 产物来源的短标签：手机上一行只放得下"哪一个产物"，不是整条路径 */
@@ -52,7 +52,7 @@ export default function Sessions() {
 
   async function onStop(id: string) {
     try {
-      await api.stopSession(id, 'inconclusive', '控制台强制回收');
+      await api.stopSession(id);
       toast.success('已请求回收', { description: id });
       await load();
     } catch (err) {
@@ -106,7 +106,6 @@ export default function Sessions() {
                         <StatusBadge status={s.status} />
                       </div>
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                        <VerdictBadge verdict={s.verdict} />
                         <span>{s.app}</span>
                         <span>{formatAgo(s.createdAt)}</span>
                         {running && (
@@ -134,7 +133,6 @@ export default function Sessions() {
                       <TableHead>会话</TableHead>
                       <TableHead>产物 / 版本</TableHead>
                       <TableHead>状态</TableHead>
-                      <TableHead>结论</TableHead>
                       <TableHead>创建</TableHead>
                       <TableHead className="text-right">操作</TableHead>
                     </TableRow>
@@ -160,9 +158,6 @@ export default function Sessions() {
                           </TableCell>
                           <TableCell>
                             <StatusBadge status={s.status} />
-                          </TableCell>
-                          <TableCell>
-                            <VerdictBadge verdict={s.verdict} />
                           </TableCell>
                           <TableCell className="text-xs text-muted-foreground">{formatAgo(s.createdAt)}</TableCell>
                           <TableCell className="text-right">

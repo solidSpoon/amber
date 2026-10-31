@@ -1,68 +1,69 @@
 package mcpserver
 
-// stop_test.go：收尾工具的结论字段。
+// stop_test.go：收尾工具只收一个会话 ID。
 //
-// 结论是读者第一眼看的东西，而它只有三个合法取值。以前它是个自由字符串：
-// 写成 "passed" 也能存进库，界面只认 pass/fail/inconclusive，于是徽章静默消失。
+// 这里曾经还有 verdict（pass/fail/inconclusive）和 summary —— 那是把 Amber 当
+// 「AI 验收平台」时留下的盖章参数。它现在只记录发生了什么，判断留给读记录的人，
+// 所以参数表里不该再有结论。
+//
+// 这条测试盯的是「别再把这个概念加回来」。
 
 import (
+	"context"
 	"encoding/json"
-	"strings"
+	"io"
+	"log/slog"
 	"testing"
+
+	"github.com/solidSpoon/rigd/internal/config"
+	"github.com/solidSpoon/rigd/internal/session"
+	"github.com/solidSpoon/rigd/internal/store"
 )
 
-func TestNormalizeVerdict(t *testing.T) {
-	ok := map[string]string{
-		"":              "",
-		"pass":          "pass",
-		"FAIL":          "fail",
-		" Inconclusive": "inconclusive",
-	}
-	for raw, want := range ok {
-		got, err := normalizeVerdict(raw)
-		if err != nil || got != want {
-			t.Fatalf("normalizeVerdict(%q) = %q, %v；期望 %q", raw, got, err, want)
-		}
-	}
-	for _, bad := range []string{"passed", "ok", "true", "通过"} {
-		if _, err := normalizeVerdict(bad); err == nil {
-			t.Fatalf("%q 应该被拒（界面不认这个值，存进去等于丢结论）", bad)
-		} else if !strings.Contains(err.Error(), "pass") {
-			t.Fatalf("报错要说清可选值：%v", err)
-		}
-	}
-}
-
-// schema 里 verdict 必须是枚举，调用方一眼就能看到合法取值。
-func TestStopSchemaEnumeratesVerdict(t *testing.T) {
-	raw, err := json.Marshal(stopInputSchema())
+func TestStopToolTakesOnlySessionID(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, ":memory:")
 	if err != nil {
-		t.Fatalf("序列化 schema 失败: %v", err)
+		t.Fatalf("打开库失败: %v", err)
 	}
+	defer func() { _ = st.Close() }()
+
+	cfg := &config.Config{DataDir: t.TempDir(), Image: "x", MaxSessions: 1, CDPPortBase: 39222, VNCPortBase: 36080}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tools, err := Catalog(ctx, NewServer(session.NewManager(cfg, st, noopDocker{}, nil, log), st, cfg, log))
+	if err != nil {
+		t.Fatalf("读取工具清单失败: %v", err)
+	}
+
+	var schema json.RawMessage
+	for _, tool := range tools {
+		if tool.Name == "amber_stop" {
+			schema = tool.Schema
+		}
+	}
+	if schema == nil {
+		t.Fatal("工具清单里没有 amber_stop")
+	}
+
 	var parsed struct {
-		Properties struct {
-			Verdict struct {
-				Enum []string `json:"enum"`
-			} `json:"verdict"`
-			Summary struct {
-				Type string `json:"type"`
-			} `json:"summary"`
-		} `json:"properties"`
-		Required []string `json:"required"`
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
 	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	if err := json.Unmarshal(schema, &parsed); err != nil {
 		t.Fatalf("解析 schema 失败: %v", err)
 	}
-	if len(parsed.Properties.Verdict.Enum) != len(verdictValues) {
-		t.Fatalf("verdict 枚举 = %v，期望 %v", parsed.Properties.Verdict.Enum, verdictValues)
+	if len(parsed.Properties) != 1 {
+		t.Fatalf("收尾工具的参数 = %v，期望只有 sessionId", parsed.Properties)
 	}
-	for i, value := range verdictValues {
-		if parsed.Properties.Verdict.Enum[i] != value {
-			t.Fatalf("verdict 枚举第 %d 项 = %q，期望 %q", i, parsed.Properties.Verdict.Enum[i], value)
-		}
+	if _, ok := parsed.Properties["sessionId"]; !ok {
+		t.Fatal("缺少 sessionId")
 	}
-	// 只有 sessionId 是必填：结论可以不填
 	if len(parsed.Required) != 1 || parsed.Required[0] != "sessionId" {
 		t.Fatalf("必填字段 = %v，期望只有 sessionId", parsed.Required)
+	}
+	for _, gone := range []string{"verdict", "summary"} {
+		if _, ok := parsed.Properties[gone]; ok {
+			t.Fatalf("收尾工具不该再有 %q：判断由读记录的人下", gone)
+		}
 	}
 }

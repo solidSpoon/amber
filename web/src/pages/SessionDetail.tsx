@@ -8,7 +8,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/u
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScreenStage } from '@/components/screen-stage';
-import { StatusBadge, VerdictBadge } from '@/components/session-badges';
+import { StatusBadge } from '@/components/session-badges';
 import { api, formatAgo, type LogSource, type Session, type SessionEvent } from '../api';
 
 /**
@@ -79,7 +79,6 @@ export default function SessionDetail({ id }: { id: string }) {
           {/* 标题就是这次会话的意图；会话 ID 退到下面一行，读者不必靠它认人 */}
           <h1 className="text-base font-medium">{session.title || session.app}</h1>
           <StatusBadge status={session.status} />
-          <VerdictBadge verdict={session.verdict} />
           <Badge variant="outline">{session.app}</Badge>
           <span className="font-mono text-xs text-muted-foreground">{session.ref || session.id}</span>
         </div>
@@ -101,7 +100,9 @@ export default function SessionDetail({ id }: { id: string }) {
         </div>
       </header>
 
-      {session.summary && <p className="text-sm leading-relaxed">{session.summary}</p>}
+      {/* 会话是怎么结束的：只在服务端自己收尾时才有（超时回收、进程退出、容器挂掉）。
+          它不是结论——记录里不放任何"通不通过"的判断。 */}
+      {session.note && <p className="text-sm text-muted-foreground">{session.note}</p>}
 
       {session.error && (
         <Alert variant="destructive">

@@ -158,9 +158,9 @@ type sessionDTO struct {
 	// 后人是「录像的整幅像素」。两者不同就说明录像里有应当被裁掉的桌面。
 	Frame   *geometryDTO `json:"frame,omitempty"`
 	Display *geometryDTO `json:"display,omitempty"`
-	Verdict string       `json:"verdict,omitempty"`
-	Summary string       `json:"summary,omitempty"`
-	Error   string       `json:"error,omitempty"`
+	// Note 会话是怎么结束的（服务端写；不是结论，只解释"为什么没走到最后"）
+	Note  string `json:"note,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 type geometryDTO struct {
@@ -193,7 +193,7 @@ func toSessionDTO(s store.Session) sessionDTO {
 	dto := sessionDTO{
 		ID: s.ID, Title: s.Title, App: s.App, Ref: s.Ref, Status: string(s.Status),
 		CDPPort: s.CDPPort, VNCPort: s.VNCPort, VideoDurationMS: s.VideoDurationMS,
-		Verdict: s.Verdict, Summary: s.Summary, Error: s.Error,
+		Note: s.Note, Error: s.Error,
 		Frame: toGeometry(s.Frame), Display: toGeometry(s.Display),
 		Payload: s.Payload, Assets: decodeAssetsJSON(s.Assets),
 		CreatedAt: s.CreatedAt.UTC().Format(time.RFC3339),
@@ -295,20 +295,11 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toSessionDTO(sess))
 }
 
-type stopRequest struct {
-	Verdict string `json:"verdict"`
-	Summary string `json:"summary"`
-}
-
+// stopSession 强制回收会话：控制台上唯一的人工动作（AI 卡死或连接断了时的出口）。
+//
+// 不收任何结论参数：控制台是给读者看的，不是给人盖章的。
 func (s *Server) stopSession(w http.ResponseWriter, r *http.Request) {
-	var req stopRequest
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("请求体不是合法 JSON: %w", err))
-			return
-		}
-	}
-	sess, err := s.manager.Stop(r.Context(), chi.URLParam(r, "id"), req.Verdict, req.Summary)
+	sess, err := s.manager.Stop(r.Context(), chi.URLParam(r, "id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return

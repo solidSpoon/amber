@@ -33,8 +33,8 @@ export interface Session {
   frame?: Geometry;
   /** 录像的整幅像素（= 录制时的虚拟屏） */
   display?: Geometry;
-  verdict?: string;
-  summary?: string;
+  /** 会话是怎么结束的（服务端写，如"会话超时被回收"）；不是结论 */
+  note?: string;
   error?: string;
 }
 
@@ -171,8 +171,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 export const api = {
   listSessions: () => get<{ sessions: Session[] }>('/api/sessions'),
   getSession: (id: string) => get<Session>(`/api/sessions/${id}`),
-  stopSession: (id: string, verdict?: string, summary?: string) =>
-    post<Session>(`/api/sessions/${id}/stop`, { verdict, summary }),
+  stopSession: (id: string) => post<Session>(`/api/sessions/${id}/stop`, {}),
   listEvents: (id: string) => get<{ events: SessionEvent[] }>(`/api/sessions/${id}/events`),
   metrics: () => get<{ samples: Sample[] }>('/api/system/metrics'),
   payloads: () => get<PayloadsResponse>('/api/payloads'),

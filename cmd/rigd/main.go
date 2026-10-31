@@ -124,7 +124,7 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 		logger.Warn("读取活跃会话失败", "err", err)
 	}
 	for _, id := range ids {
-		if _, err := manager.Stop(shutdownCtx, id, "", "服务关闭时自动收尾"); err != nil {
+		if _, err := manager.StopWithNote(shutdownCtx, id, "服务关闭时自动收尾"); err != nil {
 			logger.Warn("收尾会话失败", "session", id, "err", err)
 		}
 	}

@@ -17,18 +17,3 @@ export function StatusBadge({ status }: { status: SessionStatus }) {
   const spec = STATUS[status] ?? { label: status, variant: 'outline' as const };
   return <Badge variant={spec.variant}>{spec.label}</Badge>;
 }
-
-const VERDICT = {
-  pass: { label: '成立', variant: 'success' as const },
-  fail: { label: '不成立', variant: 'destructive' as const },
-  inconclusive: { label: '看不出', variant: 'warning' as const },
-};
-
-/** 结论徽章：没给结论时留一个占位横线，避免表格出现空洞 */
-export function VerdictBadge({ verdict }: { verdict?: string }) {
-  const spec = verdict ? VERDICT[verdict as keyof typeof VERDICT] : undefined;
-  // 还没有结论时什么都不画：会话在跑的时候给个「—」等于在说"判定失败"，
-  // 而事实是"还没到判定的时候"。
-  if (!spec) return null;
-  return <Badge variant={spec.variant}>{spec.label}</Badge>;
-}
