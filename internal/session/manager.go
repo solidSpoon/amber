@@ -224,7 +224,7 @@ func (m *Manager) eachManifestSource(payload string, assets map[string]string, f
 	seen := make(map[string]bool, len(sources))
 	for _, raw := range sources {
 		src, err := ParseSource(raw)
-		if err != nil || src.Kind != "manifest" || seen[src.Digest] {
+		if err != nil || src.Kind != sourceManifest || seen[src.Digest] {
 			continue
 		}
 		seen[src.Digest] = true
@@ -235,7 +235,7 @@ func (m *Manager) eachManifestSource(payload string, assets map[string]string, f
 // retainSources 给用到的 manifest 加引用；尽力而为（失败只告警，不影响会话）。
 func (m *Manager) retainSources(ctx context.Context, payload string, assets map[string]string) {
 	m.eachManifestSource(payload, assets, func(digest string) {
-		if err := m.store.Retain(ctx, "manifest", digest); err != nil {
+		if err := m.store.Retain(ctx, store.KindManifest, digest); err != nil {
 			m.log.Warn("增加产物引用失败", "manifest", digest, "err", err)
 		}
 	})
@@ -244,7 +244,7 @@ func (m *Manager) retainSources(ctx context.Context, payload string, assets map[
 // releaseSources 归还引用（收尾时调用），让 GC 能把没人用的产物删掉。
 func (m *Manager) releaseSources(ctx context.Context, sess store.Session) {
 	m.eachManifestSource(sess.Payload, decodeAssets(sess.Assets), func(digest string) {
-		if err := m.store.Release(ctx, "manifest", digest); err != nil {
+		if err := m.store.Release(ctx, store.KindManifest, digest); err != nil {
 			m.log.Warn("释放产物引用失败", "manifest", digest, "err", err)
 		}
 	})

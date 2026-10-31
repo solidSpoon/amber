@@ -57,9 +57,15 @@ type AssetSlot struct {
 	Env string `json:"env"`
 }
 
+// 输入物的两种来源写法（也是 Source.Kind 的取值）。
+const (
+	sourceDir      = "dir"
+	sourceManifest = "manifest"
+)
+
 // Source 一个输入物的来源。
 type Source struct {
-	Kind string // dir | manifest
+	Kind string // sourceDir | sourceManifest
 	// Path 宿主目录（Kind=dir）
 	Path string
 	// Digest 已上传的目录树（Kind=manifest，裸 hex）
@@ -79,14 +85,14 @@ func ParseSource(raw string) (Source, error) {
 		if !filepath.IsAbs(path) {
 			return Source{}, fmt.Errorf("dir 来源必须是绝对路径：%q", raw)
 		}
-		return Source{Kind: "dir", Path: path, Raw: value}, nil
+		return Source{Kind: sourceDir, Path: path, Raw: value}, nil
 	}
 	if rest, ok := strings.CutPrefix(value, "manifest:"); ok {
 		digest, err := store.NormalizeDigest(rest)
 		if err != nil {
 			return Source{}, err
 		}
-		return Source{Kind: "manifest", Digest: digest, Raw: value}, nil
+		return Source{Kind: sourceManifest, Digest: digest, Raw: value}, nil
 	}
 	return Source{}, fmt.Errorf("无法识别的来源 %q（支持 dir:/绝对路径 或 manifest:sha256:…）", raw)
 }
@@ -119,7 +125,7 @@ func (m *Manager) resolvePayload(ctx context.Context, dir, raw string, assets ma
 	}
 
 	input := payloadInput{Source: src}
-	if src.Kind == "dir" {
+	if src.Kind == sourceDir {
 		if err := m.checkWorkspacePath(src.Path); err != nil {
 			return payloadInput{}, err
 		}
@@ -312,7 +318,7 @@ func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []
 		}
 		mount := assetMount{Slot: slot}
 		switch src.Kind {
-		case "dir":
+		case sourceDir:
 			if err := m.checkWorkspacePath(src.Path); err != nil {
 				return nil, err
 			}
@@ -328,7 +334,7 @@ func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []
 					return nil, err
 				}
 			}
-		case "manifest":
+		case sourceManifest:
 			manifest, err := m.store.GetManifest(ctx, src.Digest)
 			if err != nil {
 				return nil, fmt.Errorf("素材 %q 的 manifest 不存在：%w", slot.Name, err)

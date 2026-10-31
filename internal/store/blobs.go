@@ -149,11 +149,6 @@ func (s *Store) touchBlob(ctx context.Context, digest string) error {
 	return err
 }
 
-// BlobFile 打开一个 blob 供读取（物化目录树时用）。
-func (s *Store) BlobFile(digest string) (*os.File, error) {
-	return os.Open(s.BlobPath(digest))
-}
-
 // PutManifest 登记一棵目录树；已存在则复用（同样的树 → 同样的 digest）。
 func (s *Store) PutManifest(ctx context.Context, entries []ManifestEntry) (Manifest, error) {
 	if len(entries) == 0 {
@@ -246,11 +241,28 @@ func (s *Store) GetManifest(ctx context.Context, digest string) (Manifest, error
 	return Manifest{Digest: digest, Entries: entries, Bytes: bytes, Refs: refs}, nil
 }
 
+// 引用计数能挂在两种东西上：一棵产物树，或者一份原始字节。
+const (
+	KindManifest = "manifest"
+	KindBlob     = "blob"
+)
+
+// refTable 把 kind 翻译成表名。写错 kind 直接报错，而不是悄悄去改 manifests。
+func refTable(kind string) (string, error) {
+	switch kind {
+	case KindManifest:
+		return "manifests", nil
+	case KindBlob:
+		return "blobs", nil
+	}
+	return "", fmt.Errorf("未知的引用类型 %q（只支持 manifest / blob）", kind)
+}
+
 // Retain 把一个 manifest 或 blob 标记为"被用着"（起会话时调用）。
 func (s *Store) Retain(ctx context.Context, kind, digest string) error {
-	table := "manifests"
-	if kind == "blob" {
-		table = "blobs"
+	table, err := refTable(kind)
+	if err != nil {
+		return err
 	}
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE `+table+` SET refs = refs + 1, last_used_at = ? WHERE digest = ?`,
@@ -266,12 +278,12 @@ func (s *Store) Retain(ctx context.Context, kind, digest string) error {
 
 // Release 归还引用（会话收尾时调用）。
 func (s *Store) Release(ctx context.Context, kind, digest string) error {
-	table := "manifests"
-	if kind == "blob" {
-		table = "blobs"
+	table, err := refTable(kind)
+	if err != nil {
+		return err
 	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE `+table+` SET refs = CASE WHEN refs > 0 THEN refs - 1 ELSE 0 END where digest = ?`, digest)
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE `+table+` SET refs = CASE WHEN refs > 0 THEN refs - 1 ELSE 0 END WHERE digest = ?`, digest)
 	return err
 }
 
@@ -281,84 +293,104 @@ func (s *Store) Release(ctx context.Context, kind, digest string) error {
 func (s *Store) Sweep(ctx context.Context, ttl time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-ttl).Format(time.RFC3339Nano)
 
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT digest, entries FROM manifests WHERE refs <= 0 AND last_used_at < ?`, cutoff)
+	// 先清产物树：它引用的 blob 引用计数要跟着还回去，否则字节永远删不掉。
+	deadManifests, err := s.deadManifests(ctx, cutoff)
 	if err != nil {
 		return 0, err
 	}
-	type dead struct {
-		digest  string
-		entries []ManifestEntry
-	}
-	var deadManifests []dead
-	for rows.Next() {
-		var digest, raw string
-		if err := rows.Scan(&digest, &raw); err != nil {
-			_ = rows.Close()
+	for _, item := range deadManifests {
+		if err := s.dropManifest(ctx, item); err != nil {
 			return 0, err
 		}
-		var entries []ManifestEntry
-		_ = json.Unmarshal([]byte(raw), &entries)
-		deadManifests = append(deadManifests, dead{digest: digest, entries: entries})
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
+
+	deadBlobs, err := s.deadBlobs(ctx, cutoff)
+	if err != nil {
 		return 0, err
 	}
-	_ = rows.Close()
-
 	var freed int64
-	for _, item := range deadManifests {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return freed, err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM manifests WHERE digest = ? AND refs <= 0`, item.digest); err != nil {
-			_ = tx.Rollback()
-			return freed, err
-		}
-		for _, entry := range item.entries {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE blobs SET refs = CASE WHEN refs > 0 THEN refs - 1 ELSE 0 END WHERE digest = ?`,
-				entry.Digest); err != nil {
-				_ = tx.Rollback()
-				return freed, err
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return freed, err
-		}
-	}
-
-	rows, err = s.db.QueryContext(ctx,
-		`SELECT digest, size FROM blobs WHERE refs <= 0 AND last_used_at < ?`, cutoff)
-	if err != nil {
-		return freed, err
-	}
-	type deadBlob struct {
-		digest string
-		size   int64
-	}
-	var deadBlobs []deadBlob
-	for rows.Next() {
-		var item deadBlob
-		if err := rows.Scan(&item.digest, &item.size); err != nil {
-			_ = rows.Close()
-			return freed, err
-		}
-		deadBlobs = append(deadBlobs, item)
-	}
-	_ = rows.Close()
-
 	for _, item := range deadBlobs {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM blobs WHERE digest = ? AND refs <= 0`, item.digest); err != nil {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM blobs WHERE digest = ? AND refs <= 0`, item.Digest); err != nil {
 			return freed, err
 		}
-		if err := os.Remove(s.BlobPath(item.digest)); err == nil {
-			freed += item.size
+		if err := os.Remove(s.BlobPath(item.Digest)); err == nil {
+			freed += item.Size
 		}
 	}
 	return freed, nil
+}
+
+// deadManifests 超出 ttl 且没人引用的产物树。
+func (s *Store) deadManifests(ctx context.Context, cutoff string) ([]Manifest, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT digest, entries FROM manifests WHERE refs <= 0 AND last_used_at < ?`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	return scanAll(rows, scanManifestEntries)
+}
+
+func scanManifestEntries(sc rowScanner) (Manifest, error) {
+	var (
+		manifest Manifest
+		raw      string
+	)
+	if err := sc.Scan(&manifest.Digest, &raw); err != nil {
+		return Manifest{}, err
+	}
+	if err := json.Unmarshal([]byte(raw), &manifest.Entries); err != nil {
+		return Manifest{}, fmt.Errorf("解析 manifest %s 失败: %w", manifest.Digest, err)
+	}
+	return manifest, nil
+}
+
+// dropManifest 删掉一棵没人引用的产物树，并把它对每个 blob 的引用还回去。
+func (s *Store) dropManifest(ctx context.Context, manifest Manifest) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM manifests WHERE digest = ? AND refs <= 0`, manifest.Digest); err != nil {
+		return err
+	}
+	for _, entry := range manifest.Entries {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE blobs SET refs = CASE WHEN refs > 0 THEN refs - 1 ELSE 0 END WHERE digest = ?`,
+			entry.Digest); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) deadBlobs(ctx context.Context, cutoff string) ([]struct {
+	Digest string
+	Size   int64
+}, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT digest, size FROM blobs WHERE refs <= 0 AND last_used_at < ?`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []struct {
+		Digest string
+		Size   int64
+	}
+	for rows.Next() {
+		var item struct {
+			Digest string
+			Size   int64
+		}
+		if err := rows.Scan(&item.Digest, &item.Size); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // RecentManifests 最近用过的产物（控制台选 payload 用）。
@@ -371,22 +403,21 @@ func (s *Store) RecentManifests(ctx context.Context, limit int) ([]Manifest, err
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	out := make([]Manifest, 0, limit)
-	for rows.Next() {
+	return scanAll(rows, func(sc rowScanner) (Manifest, error) {
 		var (
 			manifest   Manifest
 			raw        string
 			lastUsedAt string
 		)
-		if err := rows.Scan(&manifest.Digest, &raw, &manifest.Bytes, &manifest.Refs, &lastUsedAt); err != nil {
-			return nil, err
+		if err := sc.Scan(&manifest.Digest, &raw, &manifest.Bytes, &manifest.Refs, &lastUsedAt); err != nil {
+			return Manifest{}, err
 		}
-		_ = json.Unmarshal([]byte(raw), &manifest.Entries)
+		if err := json.Unmarshal([]byte(raw), &manifest.Entries); err != nil {
+			return Manifest{}, fmt.Errorf("解析 manifest %s 失败: %w", manifest.Digest, err)
+		}
 		manifest.LastUsedAt = lastUsedAt
-		out = append(out, manifest)
-	}
-	return out, rows.Err()
+		return manifest, nil
+	})
 }
 
 // BlobUsage 库里一共占用多少（看板显示用）。
