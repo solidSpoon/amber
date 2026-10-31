@@ -295,7 +295,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		"RIG_ENTRY":      payload.Entry,
 		"RIG_READY_CDP":  fmt.Sprint(payload.Recipe.Ready.CDP),
 		"RIG_READY_SEC":  fmt.Sprint(payload.Recipe.Ready.TimeoutSec),
-		"DISPLAY_NUM": fmt.Sprint(m.displayOf(sess.Slot)),
+		"DISPLAY_NUM":    fmt.Sprint(m.displayOf(sess.Slot)),
 	}
 	argsJSON := "[]"
 	if len(payload.Recipe.Args) > 0 {
@@ -479,15 +479,22 @@ func (m *Manager) finalize(ctx context.Context, sess store.Session, verdict, sum
 	_ = os.RemoveAll(filepath.Join(sess.Dir, "assets"))
 
 	videoPath := filepath.Join(sess.Dir, "video", "session.mp4")
-	if info, err := os.Stat(videoPath); err == nil {
-		sess.VideoPath = videoPath
-		_ = m.store.AddArtifact(ctx, store.Artifact{
-			SessionID: sess.ID, Kind: "video", Path: videoPath, Bytes: info.Size(), CreatedAt: time.Now(),
-		})
+	if info, err := os.Stat(videoPath); err == nil && info.Size() > 0 {
 		if meta, err := readVideoMeta(filepath.Join(sess.Dir, "video", "session.json")); err == nil {
 			sess.VideoDurationMS = meta.DurationMS
 		}
+		// 整场录像本身不留：没人会从头看一遍，而它又大又慢。
+		// 记录里真正被引用的是每一批那几秒画面，所以先把片段切好，再把母片删掉。
+		if n, err := m.cutClips(ctx, sess); err != nil {
+			m.log.Warn("切片段失败，部分步骤将没有画面", "session", sess.ID, "err", err)
+		} else {
+			m.log.Info("片段已归档", "session", sess.ID, "clips", n)
+		}
+		if err := os.Remove(videoPath); err != nil {
+			m.log.Warn("删除整场录像失败", "session", sess.ID, "err", err)
+		}
 	}
+	sess.VideoPath = ""
 	if err := m.store.UpdateSession(ctx, sess); err != nil {
 		return sess, err
 	}

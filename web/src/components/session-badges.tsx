@@ -27,6 +27,8 @@ const VERDICT = {
 /** 结论徽章：没给结论时留一个占位横线，避免表格出现空洞 */
 export function VerdictBadge({ verdict }: { verdict?: string }) {
   const spec = verdict ? VERDICT[verdict as keyof typeof VERDICT] : undefined;
-  if (!spec) return <span className="text-muted-foreground">—</span>;
+  // 还没有结论时什么都不画：会话在跑的时候给个「—」等于在说"判定失败"，
+  // 而事实是"还没到判定的时候"。
+  if (!spec) return null;
   return <Badge variant={spec.variant}>{spec.label}</Badge>;
 }

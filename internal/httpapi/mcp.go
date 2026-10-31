@@ -30,6 +30,13 @@ func (s *Server) mcpInfo(w http.ResponseWriter, _ *http.Request) {
 // NewMCPHandler 生成挂到 /mcp 的处理器（Streamable HTTP）。
 //
 // 每次请求都从同一个 server 实例取，保证工具集合唯一、状态一致。
+//
+// 用无会话模式（Stateless）：调用方（Cindy / Claude）会一直带着第一次 initialize 拿到的
+// Mcp-Session-Id，而这个 ID 只活在本进程内存里——rigd 一重启，后续请求全部 404
+// （session not found），客户端只能报一句没有信息量的“tools/call returned an error”。
+// 我们的工具都是“一问一答”，不需要服务端反调客户端（无采样、无 elicitation、无进度推送），
+// 所以按请求建临时会话就够了：**重启对调用方透明**。
 func NewMCPHandler(server *mcp.Server) http.Handler {
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+	opts := &mcp.StreamableHTTPOptions{Stateless: true}
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, opts)
 }

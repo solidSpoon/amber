@@ -303,8 +303,8 @@ func TestRecordLogsFailedToolCall(t *testing.T) {
 	}
 }
 
-// 收尾：停容器、登记录像产物、状态置为 finished。
-func TestStopFinalizesSessionAndRegistersVideo(t *testing.T) {
+// 收尾：停容器、把整场录像删掉（只留每批片段）、状态置为 finished。
+func TestStopFinalizesSessionAndDropsRecording(t *testing.T) {
 	ctx := context.Background()
 	m, st, fake, _ := newTestManager(t)
 	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "dashplayer")})
@@ -336,9 +336,13 @@ func TestStopFinalizesSessionAndRegistersVideo(t *testing.T) {
 		t.Fatalf("应停止容器: %v", fake.stopped)
 	}
 
+	// 整场录像没人从头看，收尾就删掉；库里也不该再挂一个 video 产物
+	if _, err := os.Stat(videoPath); !os.IsNotExist(err) {
+		t.Fatalf("整场录像应被删除，实际仍存在: %v", err)
+	}
 	artifacts, err := st.ListArtifacts(ctx, sess.ID)
-	if err != nil || len(artifacts) != 1 || artifacts[0].Kind != "video" {
-		t.Fatalf("录像未登记为产物: %+v err=%v", artifacts, err)
+	if err != nil || len(artifacts) != 0 {
+		t.Fatalf("不应再登记录像产物: %+v err=%v", artifacts, err)
 	}
 
 	stored, _ := st.GetSession(ctx, sess.ID)

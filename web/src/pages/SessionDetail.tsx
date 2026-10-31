@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeftIcon, ExternalLinkIcon, PauseIcon, PlayIcon, Maximize2Icon } from 'lucide-react';
+import { ArrowLeftIcon, ExternalLinkIcon, Maximize2Icon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -65,8 +65,8 @@ export default function SessionDetail({ id }: { id: string }) {
   const lastOffset = events.reduce((max, e) => Math.max(max, e.videoOffsetMs), 0);
 
   return (
-    // 详情页的主体是画面证据：栏宽给到 1440，录像列再单独放大，
-    // 否则在宽屏上录像只有一张邮票大，读者得点开才能看清发生了什么。
+    // 详情页的主体是画面证据：栏宽给到 1440，画面列再单独放大，
+    // 否则在宽屏上这一段只有一张邮票大，读者得点开才能看清发生了什么。
     <div className="mx-auto flex w-full max-w-[88rem] flex-col gap-6">
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -85,7 +85,7 @@ export default function SessionDetail({ id }: { id: string }) {
           <span>{formatAgo(session.createdAt)}</span>
           <span>{events.length} 步</span>
           {failures.length > 0 && <span className="text-destructive">{failures.length} 步失败</span>}
-          {lastOffset > 0 && <span>录像 {formatClock(lastOffset / 1000)}</span>}
+          {lastOffset > 0 && <span>时长 {formatClock(lastOffset / 1000)}</span>}
           {session.display && (
             <span>
               屏幕 {session.display.width}×{session.display.height}
@@ -132,13 +132,6 @@ export default function SessionDetail({ id }: { id: string }) {
         </ol>
       )}
 
-      {/* 完整录像不折叠：它是这段会话唯一能"从头看一遍"的东西，
-          藏在折叠项里等于没有。日志才是附录——出问题时才翻。 */}
-      <section className="flex flex-col gap-3 border-t pt-5">
-        <h2 className="text-sm font-medium">完整录像</h2>
-        <VideoAppendix session={session} />
-      </section>
-
       <details className="border-t pt-4">
         <summary className="cursor-pointer text-sm text-muted-foreground select-none">附录：容器与应用日志</summary>
         <div className="mt-4">
@@ -184,8 +177,8 @@ function MediaTile({
 }
 
 /**
- * 录像片段：自动循环播放（像动图），滑出视口就暂停——一页几十步全在解码没必要。
- * 它是"这四秒的过程"，不是某一步的结果。
+ * 这一段的画面：自动循环播放（像动图），滑出视口就暂停——一页几十步全在解码没必要。
+ * 它是"这几秒的过程"，不是某一步的结果；整场录像不留，所以这里就是读者能看到的动态画面。
  */
 function ClipPlayer({
   sessionId,
@@ -218,7 +211,7 @@ function ClipPlayer({
   }, [inView]);
 
   return (
-    <MediaTile label="过程录像" onZoom={onZoom}>
+    <MediaTile label="这一段的画面" onZoom={onZoom}>
       <ScreenStage display={display} className="rounded-none border-0">
         <video
           // key 带上 seq：不然 React 会复用同一个 video 元素，切换批次时还放着上一段的画面
@@ -330,75 +323,6 @@ function Lightbox({
   );
 }
 
-/** 完整录像：记录里是附录，不是主入口 */
-function VideoAppendix({ session }: { session: Session }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [playing, setPlaying] = useState(false);
-  const [time, setTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-
-  if (!session.hasVideo) {
-    return (
-      <Empty>
-        <EmptyHeader>
-          <EmptyTitle>还没有录像</EmptyTitle>
-          <EmptyDescription>会话还在启动，或启动阶段就失败了。</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    );
-  }
-
-  const toggle = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.paused) void video.play().catch(() => undefined);
-    else video.pause();
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      <ScreenStage display={session.display}>
-        <video
-          ref={videoRef}
-          preload="metadata"
-          poster={`/api/sessions/${session.id}/poster`}
-          src={`/api/sessions/${session.id}/video`}
-          className="size-full"
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
-          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-          onEnded={() => setPlaying(false)}
-        />
-      </ScreenStage>
-      <div className="flex items-center gap-3">
-        <Button size="icon-sm" variant="ghost" onClick={toggle} aria-label={playing ? '暂停' : '播放'}>
-          {playing ? <PauseIcon /> : <PlayIcon />}
-        </Button>
-        <span className="w-10 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
-          {formatClock(time)}
-        </span>
-        <input
-          type="range"
-          min={0}
-          max={duration || 0}
-          step={0.1}
-          value={Math.min(time, duration || 0)}
-          onChange={(e) => {
-            const video = videoRef.current;
-            if (!video) return;
-            video.currentTime = Number(e.target.value);
-            setTime(video.currentTime);
-          }}
-          className="h-1 min-w-0 flex-1 accent-foreground"
-          aria-label="录像进度"
-        />
-        <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">{formatClock(duration)}</span>
-      </div>
-    </div>
-  );
-}
-
 /**
  * 日志面板：容器输出（应用为什么没起来通常只在这里）与应用自身日志切换查看。
  *
@@ -490,8 +414,8 @@ function LogPanel({ sessionId }: { sessionId: string }) {
  * 桌面左右两栏——一屏能同时读到文字和画面，眼睛不用来回上下跳；
  * 窄屏自动堆成一栏，画面落在这段文字下面。
  *
- * 右边不止放录像片段：capture 返回的那张整屏截图也在这里。
- * 片段是「这四秒的过程」，截图是「run 交回去的那一帧」，两者不是一回事。
+ * 截图放在左边文字下面（run 收尾交回的那一帧），右边只放这一段的画面。
+ * 两者不是一回事：片段是「这几秒的过程」，截图是「这一批结束时的那一帧」。
  */
 function BatchRow({
   index,
@@ -509,12 +433,13 @@ function BatchRow({
   const failed = group.events.filter((e) => !e.ok);
   // 一批只放一条录像片段：批内相邻两步可能只隔 0.2 秒，逐行放就成了同一段画面循环十几遍。
   const clipEvent = group.events.find((e) => e.clip);
-  // 截图逐张列出来（capture 的、失败步骤的），它们各自是独立的一帧证据。
-  const shots = group.events.filter((e) => e.shot);
+  // 一批只贴一张图：就是这一批收尾时交回来的那一帧（run 的最后一步是 wait_and_capture）。
+  // 批内其他步骤的截图是过程，逐张铺开会把"这批的结论"淹掉。
+  const shots = pickKeyShot(group.events);
   const end = Math.max(0, group.events[group.events.length - 1].videoOffsetMs);
 
   return (
-    <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] sm:gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,38rem)]">
+    <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] sm:gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,42rem)]">
       <div className="flex min-w-0 flex-col gap-2">
         <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
           <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
@@ -571,6 +496,14 @@ function BatchRow({
       </div>
     </li>
   );
+}
+
+/** 一批的代表帧：capture 交回的那张；没有就退到批内最后一张截图 */
+function pickKeyShot(events: SessionEvent[]): SessionEvent[] {
+  const shots = events.filter((e) => e.shot);
+  if (shots.length === 0) return [];
+  const capture = shots.find((e) => e.tool === 'capture');
+  return [capture ?? shots[shots.length - 1]];
 }
 
 /** 纯等待不产生新画面，记录里并进相邻的动作，不单独占一行 */

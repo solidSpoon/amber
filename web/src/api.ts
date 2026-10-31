@@ -25,7 +25,7 @@ export interface Session {
   startedAt?: string;
   endedAt?: string;
   idleDeadline?: string;
-  hasVideo: boolean;
+  /** 这次会话录了多久；整场录像本身不保留，只有每批的片段 */
   videoDurationMs: number;
   /** 这次验的是哪份产物、挂了哪些素材槽位 */
   payload?: string;

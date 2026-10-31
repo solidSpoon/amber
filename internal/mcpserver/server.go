@@ -72,7 +72,6 @@ type startResult struct {
 	Status    string `json:"status"`
 	CDPPort   int    `json:"cdpPort"`
 	VNCURL    string `json:"vncUrl,omitempty"`
-	VideoURL  string `json:"videoUrl"`
 }
 
 func registerSessionTools(server *mcp.Server, s *Server) {
@@ -98,7 +97,6 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 			SessionID: sess.ID,
 			Status:    string(sess.Status),
 			CDPPort:   sess.CDPPort,
-			VideoURL:  fmt.Sprintf("/api/sessions/%s/video", sess.ID),
 		}
 		if sess.VNCPort > 0 {
 			result.VNCURL = fmt.Sprintf("http://127.0.0.1:%d/vnc.html?autoconnect=1", sess.VNCPort)
@@ -109,7 +107,7 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "amber_stop",
-		Description: "结束会话：停录屏、归档录像与截图、销毁容器。" +
+		Description: "结束会话：停录屏、归档每批的画面片段与截图、销毁容器。" +
 			"verdict 填 pass/fail/inconclusive，summary 写一句话结论（会显示在记录顶部）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args endArgs) (*mcp.CallToolResult, endResult, error) {
 		if strings.TrimSpace(args.SessionID) == "" {
@@ -124,7 +122,6 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 			Status:        string(sess.Status),
 			Verdict:       sess.Verdict,
 			ReportURL:     fmt.Sprintf("/#/sessions/%s", sess.ID),
-			VideoURL:      fmt.Sprintf("/api/sessions/%s/video", sess.ID),
 			DurationMS:    sess.VideoDurationMS,
 			ReportSummary: sess.Summary,
 		}
@@ -169,7 +166,6 @@ type endResult struct {
 	Verdict   string `json:"verdict,omitempty"`
 	// ReportURL 记录（步骤 + 每步画面 + 断言），提 PR 时贴这个
 	ReportURL     string `json:"reportUrl"`
-	VideoURL      string `json:"videoUrl"`
 	DurationMS    int64  `json:"durationMs"`
 	ReportSummary string `json:"summary,omitempty"`
 }

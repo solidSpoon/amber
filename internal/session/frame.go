@@ -17,12 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/solidSpoon/rigd/internal/store"
@@ -60,44 +54,6 @@ func (m *Manager) waitContainerReady(ctx context.Context, container string) erro
 		}
 	}
 	return errors.New("容器 30s 内没有报告就绪（window.json / ready.json 未出现）")
-}
-
-// Poster 返回录像首帧静帧的路径；没有就抽一张并缓存到会话目录。
-//
-// 抽帧位置取「时长的 10%，最多 5 秒」：太靠前可能是启动瞬间的空窗，
-// 太靠后又浪费解复用时间。抽不出来不算错误之外的异常，调用方按 404 处理。
-func (m *Manager) Poster(ctx context.Context, id string) (string, error) {
-	sess, err := m.Get(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	video := sess.VideoPath
-	if video == "" {
-		video = filepath.Join(sess.Dir, "video", "session.mp4")
-	}
-	if info, err := os.Stat(video); err != nil || info.Size() == 0 {
-		return "", errors.New("该会话还没有录像")
-	}
-
-	poster := filepath.Join(sess.Dir, "poster.jpg")
-	if info, err := os.Stat(poster); err == nil && info.Size() > 0 {
-		return poster, nil
-	}
-
-	offset := 5.0
-	if sess.VideoDurationMS > 0 {
-		offset = math.Min(float64(sess.VideoDurationMS)/1000/10, 5)
-	}
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-		"-ss", strconv.FormatFloat(offset, 'f', 2, 64), "-i", video,
-		"-frames:v", "1", "-vf", "scale='min(1280,iw)':-2", "-q:v", "4", poster)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("截取封面失败: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	if info, err := os.Stat(poster); err != nil || info.Size() == 0 {
-		return "", errors.New("封装文件里没有可用的帧")
-	}
-	return poster, nil
 }
 
 // probeWindowGeometry 现量一次窗口几何（只读，不改窗口）。

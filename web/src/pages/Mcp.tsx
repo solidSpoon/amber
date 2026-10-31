@@ -155,7 +155,7 @@ export default function Mcp() {
               同一台机器同时最多跑 <code className="font-mono">RIGD_MAX_SESSIONS</code>（默认 2）个会话，超出直接拒绝。
             </li>
             <li>
-              会话闲置超过 <code className="font-mono">RIGD_IDLE_TIMEOUT</code>（默认 10 分钟）会被自动回收并归档录像。
+              会话闲置超过 <code className="font-mono">RIGD_IDLE_TIMEOUT</code>（默认 10 分钟）会被自动回收并归档每批的片段。
             </li>
           </ul>
         </AlertDescription>

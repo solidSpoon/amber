@@ -13,6 +13,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -312,10 +313,29 @@ func clipWindow(target store.Event) (startMS, lengthMS int64) {
 // 保证 store.Event 里的字段在本包里都用到（避免只加了一半）。
 var _ = store.Event{}.Shot
 
-// Clip 返回某一步前后各 2 秒的短视频路径（按需切片并缓存）。
+// masterVideo 整场录像（母片）的路径。收尾时它会被删掉，只剩片段。
 //
-// 为什么是懒切片：记录里没人看的那一步不该在收尾时花时间编码。
-// 切片用固定窗口而不是「等动画结束」——可预期，也够用。
+// 老会话把路径存在库里（VideoPath），新会话一律按会话目录推算。
+func masterVideo(sess store.Session) string {
+	if sess.VideoPath != "" {
+		return sess.VideoPath
+	}
+	return filepath.Join(sess.Dir, "video", "session.mp4")
+}
+
+// clipPath 这一步的片段落在哪：同一批共用一个文件，按批起点命名。
+func clipPath(sess store.Session, target store.Event) string {
+	key := target.VideoOffsetMS
+	if target.BatchStartMS >= 0 {
+		key = target.BatchStartMS
+	}
+	return filepath.Join(sess.Dir, clipName(key))
+}
+
+// Clip 返回某一步所在那一段的短视频路径（没有缓存就现切）。
+//
+// 收尾之后母片已经删了（见 cutClips），所以正常路径是「直接命中缓存」；
+// 这里的现切只服务会话还在跑、或老会话母片还在的情况。
 func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) {
 	sess, err := m.Get(ctx, id)
 	if err != nil {
@@ -335,27 +355,91 @@ func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) 
 	if target == nil {
 		return "", fmt.Errorf("没有第 %d 步", seq)
 	}
-	if target.VideoOffsetMS < 0 || sess.VideoPath == "" {
-		return "", fmt.Errorf("这一步没有对应录像")
+	if target.VideoOffsetMS < 0 {
+		return "", fmt.Errorf("这一步没有对应画面")
 	}
 
-	startMS, lengthMS := clipWindow(*target)
-	key := target.VideoOffsetMS
-	if target.BatchStartMS >= 0 {
-		key = target.BatchStartMS
-	}
-	out := filepath.Join(sess.Dir, clipName(key))
+	out := clipPath(sess, *target)
 	if info, err := os.Stat(out); err == nil && info.Size() > 0 {
 		return out, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+	startMS, lengthMS := clipWindow(*target)
+	if err := encodeClip(ctx, masterVideo(sess), out, startMS, lengthMS); err != nil {
 		return "", err
 	}
+	return out, nil
+}
 
+// ClipReady 这一步的画面能不能给：已经切好的片段在，或者母片还在（可以现切）。
+//
+// 收尾会删掉母片，所以判断不能只看母片在不在——老会话的片段依然要能播。
+func (m *Manager) ClipReady(sess store.Session, target store.Event) bool {
+	if target.VideoOffsetMS < 0 || !HasVisual(target.Tool) {
+		return false
+	}
+	if info, err := os.Stat(clipPath(sess, target)); err == nil && info.Size() > 0 {
+		return true
+	}
+	info, err := os.Stat(masterVideo(sess))
+	return err == nil && info.Size() > 0
+}
+
+// cutClips 把每一批的片段一次性切好，切完母片就可以删了。
+//
+// 为什么要提前切：整场录像不再保留，删之前必须把记录里会被引用的画面落下来；
+// 一批只有几秒，切一遍比重放整场录像便宜得多。
+// 返回切了多少条（含命中缓存的）。
+func (m *Manager) cutClips(ctx context.Context, sess store.Session) (int, error) {
+	events, err := m.store.ListEvents(ctx, sess.ID)
+	if err != nil {
+		return 0, err
+	}
+	master := masterVideo(sess)
+	if info, err := os.Stat(master); err != nil || info.Size() == 0 {
+		return 0, nil
+	}
+	cut := 0
+	var failed error
+	seen := make(map[string]bool, len(events))
+	for _, e := range events {
+		if !m.ClipReady(sess, e) {
+			continue
+		}
+		out := clipPath(sess, e)
+		if seen[out] {
+			continue
+		}
+		seen[out] = true
+		startMS, lengthMS := clipWindow(e)
+		if err := encodeClip(ctx, master, out, startMS, lengthMS); err != nil {
+			// 一条切失败不该连累其他步骤的画面，记下第一条原因继续
+			if failed == nil {
+				failed = err
+			}
+			continue
+		}
+		cut++
+	}
+	return cut, failed
+}
+
+// encodeClip 从母片里切一段出来。
+//
+// 切片用固定窗口而不是「等动画结束」——可预期，也够用。
+func encodeClip(ctx context.Context, master, out string, startMS, lengthMS int64) error {
+	if info, err := os.Stat(out); err == nil && info.Size() > 0 {
+		return nil
+	}
+	if info, err := os.Stat(master); err != nil || info.Size() == 0 {
+		return errors.New("母片已归档，切片不可用")
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return err
+	}
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-ss", fmt.Sprintf("%.2f", float64(startMS)/1000),
-		"-i", sess.VideoPath,
+		"-i", master,
 		"-t", fmt.Sprintf("%.2f", float64(lengthMS)/1000),
 		// 记录里内联播放，960 宽足够看清界面，体积只有 1080p 的三分之一
 		"-vf", "scale='min(960,iw)':-2",
@@ -364,7 +448,7 @@ func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) 
 		out,
 	}
 	if raw, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("切片失败: %v (%s)", err, strings.TrimSpace(string(raw)))
+		return fmt.Errorf("切片失败: %v (%s)", err, strings.TrimSpace(string(raw)))
 	}
-	return out, nil
+	return nil
 }

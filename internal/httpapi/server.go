@@ -115,8 +115,6 @@ func (s *Server) Handler() http.Handler {
 		api.Post("/sessions/{id}/click", s.actionClick)
 		api.Post("/sessions/{id}/fill", s.actionFill)
 		api.Post("/sessions/{id}/press", s.actionPress)
-		api.Get("/sessions/{id}/video", s.serveVideo)
-		api.Get("/sessions/{id}/poster", s.servePoster)
 		api.Get("/sessions/{id}/events/{seq}/clip", s.serveClip)
 		// 用通配符而不是单段参数：产物路径带目录（shots/x.jpg、screenshots/x.png）
 		api.Get("/sessions/{id}/artifacts/*", s.serveArtifact)
@@ -144,19 +142,19 @@ func (s *Server) Handler() http.Handler {
 type sessionDTO struct {
 	ID string `json:"id"`
 	// Title 这次验收的意图（一句话），列表和记录顶部先展示它
-	Title           string `json:"title,omitempty"`
-	App             string `json:"app"`
-	Ref             string `json:"ref"`
-	CommitSHA       string `json:"commitSha"`
-	Status          string `json:"status"`
-	CDPPort         int    `json:"cdpPort"`
-	VNCPort         int    `json:"vncPort"`
-	CreatedAt       string `json:"createdAt"`
-	StartedAt       string `json:"startedAt,omitempty"`
-	EndedAt         string `json:"endedAt,omitempty"`
-	IdleDeadline    string `json:"idleDeadline,omitempty"`
-	HasVideo        bool   `json:"hasVideo"`
-	VideoDurationMS int64  `json:"videoDurationMs"`
+	Title        string `json:"title,omitempty"`
+	App          string `json:"app"`
+	Ref          string `json:"ref"`
+	CommitSHA    string `json:"commitSha"`
+	Status       string `json:"status"`
+	CDPPort      int    `json:"cdpPort"`
+	VNCPort      int    `json:"vncPort"`
+	CreatedAt    string `json:"createdAt"`
+	StartedAt    string `json:"startedAt,omitempty"`
+	EndedAt      string `json:"endedAt,omitempty"`
+	IdleDeadline string `json:"idleDeadline,omitempty"`
+	// VideoDurationMS 这次会话录了多久；整场录像本身不保留（见 session.finalize）
+	VideoDurationMS int64 `json:"videoDurationMs"`
 	// Payload / Assets 是这次验的是哪份产物、挂了哪些素材
 	Payload string            `json:"payload,omitempty"`
 	Assets  map[string]string `json:"assets,omitempty"`
@@ -212,11 +210,6 @@ func toSessionDTO(s store.Session) sessionDTO {
 	}
 	if !s.IdleDeadline.IsZero() {
 		dto.IdleDeadline = s.IdleDeadline.UTC().Format(time.RFC3339)
-	}
-	if s.VideoPath != "" {
-		if info, err := os.Stat(s.VideoPath); err == nil && info.Size() > 0 {
-			dto.HasVideo = true
-		}
 	}
 	return dto
 }
@@ -359,7 +352,6 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess, _ := s.manager.Get(r.Context(), chi.URLParam(r, "id"))
-	hasVideo := sess.VideoPath != ""
 	out := make([]eventDTO, 0, len(events))
 	for _, e := range events {
 		out = append(out, eventDTO{
@@ -367,33 +359,14 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 			OK: e.OK, Kind: e.Kind, Caption: e.Caption, Intent: e.Intent, Expect: e.Expect,
 			DurationMS: e.DurationMS, VideoOffsetMS: e.VideoOffsetMS,
 			Result: e.Result, Artifact: e.ArtifactPath, Shot: e.Shot,
-			Clip: e.VideoOffsetMS >= 0 && hasVideo && session.HasVisual(e.Tool), Frame: toGeometry(e.Frame),
+			Clip: s.manager.ClipReady(sess, e), Frame: toGeometry(e.Frame),
 			BatchStartMS: e.BatchStartMS, BatchEndMS: e.BatchEndMS, BatchIntent: e.BatchIntent,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
 }
 
-// serveVideo 提供录像；http.ServeFile 自带 Range，支持前端拖进度条。
-func (s *Server) serveVideo(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.manager.Get(r.Context(), chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	path := sess.VideoPath
-	if path == "" {
-		path = filepath.Join(sess.Dir, "video", "session.mp4")
-	}
-	if _, err := os.Stat(path); err != nil {
-		writeError(w, http.StatusNotFound, errors.New("该会话没有录像"))
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, path)
-}
-
-// serveClip 某一步前后 4 秒的短片（懒切片，切过就缓存）。
+// serveClip 某一步所在那一批的短片（收尾时已切好，直接命中缓存）。
 // listFeedback 最近的 AI 建议（给控制台看，也是为了后续集中分析）。
 func (s *Server) listFeedback(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -437,21 +410,6 @@ func (s *Server) serveClip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 切片一旦生成就不会变
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	http.ServeFile(w, r, path)
-}
-
-// servePoster 录像的首帧静帧（视频封面）。
-//
-// 没有它，`<video preload="metadata">` 在按下播放之前就是一块黑屏——看的人无法判断
-// 这段录像里是什么。首帧从录像里抽，抽一次缓存到会话目录。
-func (s *Server) servePoster(w http.ResponseWriter, r *http.Request) {
-	path, err := s.manager.Poster(r.Context(), chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	// 录像一旦收尾就不会变，可以放心让浏览器缓存
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	http.ServeFile(w, r, path)
 }
