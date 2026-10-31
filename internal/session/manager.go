@@ -288,37 +288,83 @@ func (m *Manager) displayOf(slot int) int {
 //
 // 就绪失败会把会话标记 failed 并停掉容器，绝不留下「容器活着但连不上」的空壳。
 func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Session, error) {
-	id := sess.ID
-	containerName := "rigd-" + id
-	cdpPort := sess.CDPPort
-	vncPort := sess.VNCPort
+	containerName := containerNameOf(sess.ID)
 
 	payload, err := m.resolvePayload(ctx, sess.Dir, sess.Payload, decodeAssets(sess.Assets), false)
 	if err != nil {
 		return m.fail(ctx, sess, err.Error()), err
 	}
 
+	containerID, err := m.docker.Run(ctx, m.containerSpec(sess, payload, containerName))
+	if err != nil {
+		return m.fail(ctx, sess, err.Error()), fmt.Errorf("启动容器失败: %w", err)
+	}
+	sess.Container = containerID
+
+	// 就绪 = 调试端口真的能连上。容器「起来了」不等于应用「能操作」：
+	// 构建失败、应用崩溃、端口没开，都会让容器活着但永远连不上。
+	// 必须等真连上才置 ready，否则调用方会对着一个空壳发工具调用。
+	inspector, readyErr := m.factory(ctx, sess.CDPPort)
+	if readyErr != nil {
+		return m.abortProvision(ctx, sess, containerName, readyErr), readyErr
+	}
+
+	// 取景 = 应用窗口，而取景是在容器里、开录之前定下来的（rig-fit-window）。
+	// 这里只读、不动窗口：录像的取景已经固定，现在再改窗口只会让画面和录像对不上。
+	// 同时必须等容器把「取景 + 开录 + 应用前置」全做完，否则前端会拿到
+	// 还没开始录的会话（偏移量全为 -1）。
+	if err := m.waitContainerReady(ctx, containerName); err != nil {
+		m.log.Warn("等待容器就绪标记超时，会话仍继续", "session", sess.ID, "err", err)
+	}
+	sess = m.recordGeometry(ctx, sess, containerName)
+
+	sess.Status = store.StatusReady
+	sess.StartedAt = time.Now()
+	sess.IdleDeadline = sess.StartedAt.Add(m.cfg.IdleTimeout)
+	if err := m.store.UpdateSession(ctx, sess); err != nil {
+		return sess, err
+	}
+
+	live := &liveSession{session: sess, inspector: inspector, lastActivity: sess.StartedAt}
+	m.mu.Lock()
+	m.live[sess.ID] = live
+	m.mu.Unlock()
+
+	// 录像起点只能在容器内读到；读不到就退化（偏移量为 -1），但要留下告警
+	if ms, err := m.readRecordingStart(ctx, containerName); err == nil {
+		live.recordingStartMs = ms
+	} else {
+		m.log.Warn("读取录像起点失败，操作偏移量将退化", "session", sess.ID, "err", err)
+	}
+
+	m.log.Info("会话就绪", "session", sess.ID,
+		"cdp", sess.CDPPort, "vnc", sess.VNCPort, "container", containerName)
+	return sess, nil
+}
+
+// containerNameOf 会话对应的容器名（唯一来源：调度器到处要用它拼 docker 命令）。
+func containerNameOf(id string) string { return "rigd-" + id }
+
+// containerSpec 是一次会话要起的那个容器：环境变量、挂载、共享网络、容量。
+//
+// 单独一个函数是因为这里全是"配错了才会发现"的东西（少一个 RIG_ 变量、
+// 挂错只读），和"起容器、等就绪"的流程混在一起时，读的人分不清哪行是契约哪行是流程。
+func (m *Manager) containerSpec(sess store.Session, payload payloadInput, containerName string) dockerx.Spec {
 	env := map[string]string{
 		"RIG_OUT":        "/out",
 		"RIG_W":          fmt.Sprint(m.cfg.Display.Width),
 		"RIG_H":          fmt.Sprint(m.cfg.Display.Height),
 		"RIG_FPS":        fmt.Sprint(m.cfg.Record.FPS),
-		"RIG_DEBUG_PORT": fmt.Sprint(cdpPort),
-		"RIG_VNC_PORT":   fmt.Sprint(vncPort),
+		"RIG_DEBUG_PORT": fmt.Sprint(sess.CDPPort),
+		"RIG_VNC_PORT":   fmt.Sprint(sess.VNCPort),
 		"RIG_APP_NAME":   sess.App,
 		"RIG_APP_DIR":    "/app",
 		"RIG_ENTRY":      payload.Entry,
 		"RIG_READY_CDP":  fmt.Sprint(payload.Recipe.Ready.CDP),
 		"RIG_READY_SEC":  fmt.Sprint(payload.Recipe.Ready.TimeoutSec),
 		"DISPLAY_NUM":    fmt.Sprint(m.displayOf(sess.Slot)),
+		"RIG_ARGS":       encodeArgs(payload.Recipe.Args),
 	}
-	argsJSON := "[]"
-	if len(payload.Recipe.Args) > 0 {
-		if raw, err := json.Marshal(payload.Recipe.Args); err == nil {
-			argsJSON = string(raw)
-		}
-	}
-	env["RIG_ARGS"] = argsJSON
 	for key, value := range payload.Recipe.Env {
 		env[key] = value
 	}
@@ -341,84 +387,63 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		})
 	}
 
-	spec := dockerx.Spec{
+	return dockerx.Spec{
 		Name:        containerName,
 		Image:       m.cfg.Image,
 		Cmd:         []string{"rig-serve"},
 		NetworkHost: true,
 		ShmSize:     "512m",
-		Labels:      dockerx.DefaultLabels(id),
+		Labels:      dockerx.DefaultLabels(sess.ID),
 		Env:         env,
 		Mounts:      mounts,
 	}
+}
 
-	containerID, err := m.docker.Run(ctx, spec)
+// encodeArgs 把 rig.json 里的启动参数编成容器读的那份 JSON。
+func encodeArgs(args []string) string {
+	if len(args) == 0 {
+		return "[]"
+	}
+	raw, err := json.Marshal(args)
 	if err != nil {
-		return m.fail(ctx, sess, err.Error()), fmt.Errorf("启动容器失败: %w", err)
+		return "[]"
 	}
+	return string(raw)
+}
 
-	sess.Container = containerID
-
-	// 就绪 = 调试端口真的能连上。容器「起来了」不等于应用「能操作」：
-	// 构建失败、应用崩溃、端口没开，都会让容器活着但永远连不上。
-	// 必须等真连上才置 ready，否则调用方会对着一个空壳发工具调用。
-	inspector, readyErr := m.factory(ctx, cdpPort)
-	if readyErr != nil {
-		// 容器里为什么没起来，答案只在它的日志里：抓下来写进会话目录，别让它随 --rm 消失
-		detail := fmt.Sprintf("等待应用就绪失败: %v", readyErr)
-		if path, err := m.archiveContainerLogs(ctx, containerName, sess.Dir); err == nil && path != "" {
-			detail = fmt.Sprintf("%s\n容器日志：logs/container.log", detail)
-		}
-		// 容器已经不可能再用了，取完日志就删，别留垃圾
-		if err := m.docker.Remove(ctx, containerName); err != nil {
-			m.log.Warn("删除失败容器时出错", "session", id, "err", err)
-		}
-		sess = m.fail(ctx, sess, detail)
-		if err := m.docker.Stop(ctx, containerName, 10*time.Second); err != nil {
-			m.log.Warn("停掉未就绪的容器失败", "session", id, "err", err)
-		}
-		m.log.Error("会话启动失败", "session", id, "err", readyErr)
-		return sess, readyErr
+// abortProvision 应用没能就绪时的收尾：留下容器日志、删掉容器、把会话记为失败。
+//
+// 日志必须在删容器之前取：应用为什么没起来，答案只在它的 stdout/stderr 里。
+func (m *Manager) abortProvision(ctx context.Context, sess store.Session, containerName string, readyErr error) store.Session {
+	detail := fmt.Sprintf("等待应用就绪失败: %v", readyErr)
+	if path, err := m.archiveContainerLogs(ctx, containerName, sess.Dir); err == nil && path != "" {
+		detail = fmt.Sprintf("%s\n容器日志：logs/container.log", detail)
 	}
-
-	// 取景 = 应用窗口，而取景是在容器里、开录之前定下来的（rig-fit-window）。
-	// 这里只读、不动窗口：录像的取景已经固定，现在再改窗口只会让画面和录像对不上。
-	// 同时必须等容器把「取景 + 开录 + 应用前置」全做完，否则前端会拿到
-	// 还没开始录的会话（偏移量全为 -1）。
-	if err := m.waitContainerReady(ctx, containerName); err != nil {
-		m.log.Warn("等待容器就绪标记超时，会话仍继续", "session", id, "err", err)
+	if err := m.docker.Remove(ctx, containerName); err != nil {
+		m.log.Warn("删除失败容器时出错", "session", sess.ID, "err", err)
 	}
-	if frame, display, err := m.probeWindowGeometry(ctx, containerName, sess.Slot); err != nil {
-		m.log.Warn("读不到画面几何，界面将按整幅画面显示", "session", id, "err", err)
-	} else {
-		sess.Frame = frame
-		sess.Display = display
-		m.log.Info("画面几何", "session", id,
-			"window", fmt.Sprintf("%dx%d", frame.Width, frame.Height),
-			"display", fmt.Sprintf("%dx%d", display.Width, display.Height))
+	sess = m.fail(ctx, sess, detail)
+	if err := m.docker.Stop(ctx, containerName, 10*time.Second); err != nil {
+		m.log.Warn("停掉未就绪的容器失败", "session", sess.ID, "err", err)
 	}
+	m.log.Error("会话启动失败", "session", sess.ID, "err", readyErr)
+	return sess
+}
 
-	sess.Status = store.StatusReady
-	sess.StartedAt = time.Now()
-	sess.IdleDeadline = sess.StartedAt.Add(m.cfg.IdleTimeout)
-	if err := m.store.UpdateSession(ctx, sess); err != nil {
-		return sess, err
+// recordGeometry 现量一次画面几何存进会话；量不到就按整幅画面显示。
+//
+// 这是证据的一部分（记录按它裁剪片段），所以每次都记日志，别让它悄悄退化。
+func (m *Manager) recordGeometry(ctx context.Context, sess store.Session, containerName string) store.Session {
+	frame, display, err := m.probeWindowGeometry(ctx, containerName, sess.Slot)
+	if err != nil {
+		m.log.Warn("读不到画面几何，界面将按整幅画面显示", "session", sess.ID, "err", err)
+		return sess
 	}
-
-	live := &liveSession{session: sess, inspector: inspector, lastActivity: sess.StartedAt}
-	m.mu.Lock()
-	m.live[id] = live
-	m.mu.Unlock()
-
-	// 录像起点只能在容器内读到；读不到就退化（偏移量为 -1），但要留下告警
-	if ms, err := m.readRecordingStart(ctx, containerName); err == nil {
-		live.recordingStartMs = ms
-	} else {
-		m.log.Warn("读取录像起点失败，操作偏移量将退化", "session", id, "err", err)
-	}
-
-	m.log.Info("会话就绪", "session", id, "cdp", cdpPort, "vnc", vncPort, "container", containerName)
-	return sess, nil
+	sess.Frame, sess.Display = frame, display
+	m.log.Info("画面几何", "session", sess.ID,
+		"window", fmt.Sprintf("%dx%d", frame.Width, frame.Height),
+		"display", fmt.Sprintf("%dx%d", display.Width, display.Height))
+	return sess
 }
 
 // Stop 收尾会话：停容器（让容器内录屏正常收尾）→ 归档产物 → 写结论。
@@ -442,7 +467,7 @@ func (m *Manager) Stop(ctx context.Context, id, verdict, summary string) (store.
 	sess.Status = store.StatusStopping
 	_ = m.store.UpdateSession(ctx, sess)
 
-	containerName := "rigd-" + id
+	containerName := containerNameOf(id)
 	if err := m.docker.Stop(ctx, containerName, 25*time.Second); err != nil && !errors.Is(err, dockerx.ErrContainerNotFound) {
 		m.log.Warn("停止容器失败", "session", id, "err", err)
 	}
@@ -964,7 +989,7 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		}
 
 		// 容器没了就标记失败，别让它一直挂在"运行中"
-		state, err := m.docker.Inspect(ctx, "rigd-"+sess.ID)
+		state, err := m.docker.Inspect(ctx, containerNameOf(sess.ID))
 		if err != nil || !state.Running {
 			m.fail(ctx, sess, "控制面重启时容器已不在运行")
 			continue
@@ -977,7 +1002,7 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		if dialErr == nil {
 			live.inspector = inspector
 			// 接管时同样不碰窗口，只重新量一次几何（应用重启后可能换了尺寸）
-			if frame, display, geoErr := m.probeWindowGeometry(ctx, "rigd-"+sess.ID, sess.Slot); geoErr == nil {
+			if frame, display, geoErr := m.probeWindowGeometry(ctx, containerNameOf(sess.ID), sess.Slot); geoErr == nil {
 				sess.Frame = frame
 				sess.Display = display
 				_ = m.store.UpdateSession(ctx, sess)
@@ -987,7 +1012,7 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 			m.fail(ctx, sess, fmt.Sprintf("接管失败：%v", dialErr))
 			continue
 		}
-		if ms, err := m.readRecordingStart(ctx, "rigd-"+sess.ID); err == nil {
+		if ms, err := m.readRecordingStart(ctx, containerNameOf(sess.ID)); err == nil {
 			live.recordingStartMs = ms
 		}
 
@@ -1040,7 +1065,7 @@ func (m *Manager) dropInspector(id string) {
 
 // checkContainerAlive 巡检：容器没了就把会话收尾，避免"显示 ready 但点不动"。
 func (m *Manager) checkContainerAlive(ctx context.Context, id string) {
-	state, err := m.docker.Inspect(ctx, "rigd-"+id)
+	state, err := m.docker.Inspect(ctx, containerNameOf(id))
 	if err == nil && state.Running {
 		return
 	}
@@ -1113,7 +1138,7 @@ func (m *Manager) syncFrame(ctx context.Context, id string, insp Inspector) {
 	// 视口变了，现量一次精确的窗口矩形（含位置）；量不到就按左上角+视口尺寸算
 	frame := store.Rect{X: sess.Frame.X, Y: sess.Frame.Y, Width: width, Height: height}
 	display := sess.Display
-	if exact, gotDisplay, geoErr := m.probeWindowGeometry(ctx, "rigd-"+id, sess.Slot); geoErr == nil {
+	if exact, gotDisplay, geoErr := m.probeWindowGeometry(ctx, containerNameOf(id), sess.Slot); geoErr == nil {
 		frame, display = exact, gotDisplay
 	}
 	if !display.Known() {
