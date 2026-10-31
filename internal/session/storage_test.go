@@ -8,6 +8,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,5 +131,52 @@ func mustWrite(t *testing.T, path string, body []byte) {
 	}
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatalf("写文件失败: %v", err)
+	}
+}
+
+// 时间线的偏移量以"录像真正开始"为原点，并且把那个时刻本身写进去。
+//
+// 这一点容易搞错：会话创建时间、容器就绪时间都比开录早，
+// 用它们当原点，所有偏移量都会整体前移。
+func TestTimelineAnchorsAtRecordingStart(t *testing.T) {
+	ctx := context.Background()
+	m, st, _, _ := newTestManager(t)
+	sess, err := m.Start(ctx, Options{Payload: "dir:" + writeTestPayload(t, "dashplayer")})
+	if err != nil {
+		t.Fatalf("起会话失败: %v", err)
+	}
+
+	// 容器开录时刻：比会话创建晚 3 秒
+	recordingStart := time.Now().Add(-3 * time.Second).UnixMilli()
+	sess.RecordingStartMs = recordingStart
+	sess.VideoDurationMS = 12_000
+	if err := st.UpdateSession(ctx, sess); err != nil {
+		t.Fatalf("写会话失败: %v", err)
+	}
+	if _, err := st.AppendEvent(ctx, store.Event{
+		SessionID: sess.ID, At: time.Now(), Tool: "capture", Caption: "看一眼", OK: true, VideoOffsetMS: 1_500,
+	}); err != nil {
+		t.Fatalf("写事件失败: %v", err)
+	}
+
+	if err := m.writeTimeline(ctx, sess); err != nil {
+		t.Fatalf("导出时间线失败: %v", err)
+	}
+	raw, err := os.ReadFile(timelinePath(sess))
+	if err != nil {
+		t.Fatalf("读时间线失败: %v", err)
+	}
+	var got Timeline
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("解析时间线失败: %v", err)
+	}
+	if got.RecordingStartMs != recordingStart {
+		t.Fatalf("原点 = %d，期望 %d", got.RecordingStartMs, recordingStart)
+	}
+	if got.RecordingStartedAt == "" {
+		t.Fatal("应当给出录像起点的墙钟时间")
+	}
+	if len(got.Steps) != 1 || got.Steps[0].OffsetMS != 1_500 {
+		t.Fatalf("步骤偏移不对: %+v", got.Steps)
 	}
 }

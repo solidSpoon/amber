@@ -73,7 +73,7 @@ export default function Storage() {
         </Alert>
       )}
 
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         <Stat label="整场录像" value={totals ? formatBytes(totals.videoBytes) : '—'} hint="每个会话一份，可被 AI 重新取帧" />
         <Stat label="片段" value={totals ? formatBytes(totals.clipBytes) : '—'} hint="每批几秒，记录页直接播这个" />
         <Stat label="截图" value={totals ? formatBytes(totals.shotBytes) : '—'} hint="失败步骤与 capture 的整屏图" />
@@ -107,33 +107,58 @@ export default function Storage() {
               </EmptyHeader>
             </Empty>
           ) : (
-            <div className="flex flex-col divide-y text-sm">
-              <div className="flex items-center gap-3 pb-2 text-xs text-muted-foreground">
-                <span className="min-w-0 flex-1">会话</span>
-                <span className="w-20 text-right">录像</span>
-                <span className="w-20 text-right">片段</span>
-                <span className="w-20 text-right">截图</span>
-                <span className="w-20 text-right">合计</span>
-              </div>
-              {usage.sessions.map((s) => (
-                <div key={s.id} className="flex items-center gap-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <a href={`#/sessions/${s.id}`} className="block truncate hover:underline">
-                      {s.title || s.id}
-                      {s.running && <span className="ml-2 text-xs text-muted-foreground">运行中</span>}
-                    </a>
+            <>
+              {/* 手机：四列表格在 390px 上会把"会话"挤成竖排，改成一条会话一张卡 */}
+              <div className="flex flex-col gap-2 md:hidden">
+                {usage.sessions.map((s) => (
+                  <div key={s.id} className="flex flex-col gap-1.5 rounded-lg border p-3">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <a href={`#/sessions/${s.id}`} className="min-w-0 flex-1 truncate text-sm font-medium">
+                        {s.title || s.id}
+                      </a>
+                      <span className="shrink-0 text-sm font-medium tabular-nums">{formatBytes(s.totalBytes)}</span>
+                    </div>
                     <div className="truncate font-mono text-[11px] text-muted-foreground">
                       {s.id}
-                      {s.endedAt ? ` · ${formatAgo(s.endedAt)}` : ''}
+                      {s.running ? ' · 运行中' : s.endedAt ? ` · ${formatAgo(s.endedAt)}` : ''}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                      <span>录像 {sizeCell(s.videoBytes)}</span>
+                      <span>片段 {sizeCell(s.clipBytes)}</span>
+                      <span>截图 {sizeCell(s.shotBytes)}</span>
                     </div>
                   </div>
-                  <span className="w-20 text-right tabular-nums">{sizeCell(s.videoBytes)}</span>
-                  <span className="w-20 text-right tabular-nums">{sizeCell(s.clipBytes)}</span>
-                  <span className="w-20 text-right tabular-nums">{sizeCell(s.shotBytes)}</span>
-                  <span className="w-20 text-right font-medium tabular-nums">{sizeCell(s.totalBytes)}</span>
+                ))}
+              </div>
+
+              <div className="hidden flex-col divide-y text-sm md:flex">
+                <div className="flex items-center gap-3 pb-2 text-xs text-muted-foreground">
+                  <span className="min-w-0 flex-1">会话</span>
+                  <span className="w-20 text-right">录像</span>
+                  <span className="w-20 text-right">片段</span>
+                  <span className="w-20 text-right">截图</span>
+                  <span className="w-20 text-right">合计</span>
                 </div>
-              ))}
-            </div>
+                {usage.sessions.map((s) => (
+                  <div key={s.id} className="flex items-center gap-3 py-2">
+                    <div className="min-w-0 flex-1">
+                      <a href={`#/sessions/${s.id}`} className="block truncate hover:underline">
+                        {s.title || s.id}
+                        {s.running && <span className="ml-2 text-xs text-muted-foreground">运行中</span>}
+                      </a>
+                      <div className="truncate font-mono text-[11px] text-muted-foreground">
+                        {s.id}
+                        {s.endedAt ? ` · ${formatAgo(s.endedAt)}` : ''}
+                      </div>
+                    </div>
+                    <span className="w-20 text-right tabular-nums">{sizeCell(s.videoBytes)}</span>
+                    <span className="w-20 text-right tabular-nums">{sizeCell(s.clipBytes)}</span>
+                    <span className="w-20 text-right tabular-nums">{sizeCell(s.shotBytes)}</span>
+                    <span className="w-20 text-right font-medium tabular-nums">{sizeCell(s.totalBytes)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
 
           <div className="flex flex-wrap items-center gap-3 border-t pt-4">
@@ -178,9 +203,10 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
     <Card>
       <CardHeader>
         <CardDescription>{label}</CardDescription>
-        <CardTitle className="text-2xl tabular-nums">{value}</CardTitle>
+        <CardTitle className="text-xl tabular-nums sm:text-2xl">{value}</CardTitle>
       </CardHeader>
-      {hint && <CardContent className="text-xs text-muted-foreground">{hint}</CardContent>}
+      {/* 说明在手机上省掉：四个卡片各带一行解释，一屏就没了 */}
+      {hint && <CardContent className="hidden text-xs text-muted-foreground sm:block">{hint}</CardContent>}
     </Card>
   );
 }

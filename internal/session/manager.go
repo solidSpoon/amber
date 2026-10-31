@@ -315,6 +315,14 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 	}
 	sess = m.recordGeometry(ctx, sess, containerName)
 
+	// 录像起点只能在容器内读到。它既是偏移量的原点（内存里用），
+	// 也要落库——收尾导出时间线时得带上它，否则 offsetMs 对不上任何墙钟时间。
+	recordingStartMS, recErr := m.readRecordingStart(ctx, containerName)
+	if recErr != nil {
+		m.log.Warn("读取录像起点失败，操作偏移量将退化", "session", sess.ID, "err", recErr)
+	}
+	sess.RecordingStartMs = recordingStartMS
+
 	sess.Status = store.StatusReady
 	sess.StartedAt = time.Now()
 	sess.IdleDeadline = sess.StartedAt.Add(m.cfg.IdleTimeout)
@@ -322,17 +330,13 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		return sess, err
 	}
 
-	live := &liveSession{session: sess, inspector: inspector, lastActivity: sess.StartedAt}
+	live := &liveSession{
+		session: sess, inspector: inspector,
+		recordingStartMs: recordingStartMS, lastActivity: sess.StartedAt,
+	}
 	m.mu.Lock()
 	m.live[sess.ID] = live
 	m.mu.Unlock()
-
-	// 录像起点只能在容器内读到；读不到就退化（偏移量为 -1），但要留下告警
-	if ms, err := m.readRecordingStart(ctx, containerName); err == nil {
-		live.recordingStartMs = ms
-	} else {
-		m.log.Warn("读取录像起点失败，操作偏移量将退化", "session", sess.ID, "err", err)
-	}
 
 	m.log.Info("会话就绪", "session", sess.ID,
 		"cdp", sess.CDPPort, "vnc", sess.VNCPort, "container", containerName)
@@ -739,6 +743,10 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		}
 		if ms, err := m.readRecordingStart(ctx, containerNameOf(sess.ID)); err == nil {
 			live.recordingStartMs = ms
+			if sess.RecordingStartMs != ms {
+				sess.RecordingStartMs = ms
+				_ = m.store.UpdateSession(ctx, sess)
+			}
 		}
 
 		m.mu.Lock()

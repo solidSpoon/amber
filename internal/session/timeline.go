@@ -34,6 +34,11 @@ type Timeline struct {
 	EndedAt   string `json:"endedAt,omitempty"`
 	// About 写清这份文件怎么读：拿到它的多半是另一个 AI。
 	About string `json:"about"`
+	// RecordingStartedAt 录像真正开始的墙钟时间（RFC3339）：offsetMs 的原点。
+	// 会话开始/容器就绪都比它早（那段时间不在视频里），所以偏移必须以它为 0。
+	RecordingStartedAt string `json:"recordingStartedAt,omitempty"`
+	// RecordingStartMs 同一个原点的 epoch 毫秒，方便脚本直接算
+	RecordingStartMs int64 `json:"recordingStartMs,omitempty"`
 	// Video 母片在会话目录里的相对路径（清空存储后这个文件就不在了）
 	Video string `json:"video,omitempty"`
 	// DurationMS 母片总长
@@ -64,7 +69,8 @@ type TimelineStep struct {
 	Shot string `json:"shot,omitempty"`
 }
 
-const timelineAbout = "offsetMs 是相对 video 起点的毫秒偏移，直接喂给 ffmpeg -ss 即可取这一段；" +
+const timelineAbout = "offsetMs 是相对录像起点（recordingStartedAt，也就是 video 的第 0 毫秒）的偏移，" +
+	"直接喂给 ffmpeg -ss 即可取这一段；它不以会话创建时间或容器就绪时间为原点——那之前还没有画面。" +
 	"同一批操作的几步共用一条 clip（batchStartMs 相同）；shot 是整屏截图。" +
 	"清空存储后 video/clip/shot 指向的文件会不存在，但这份清单本身保留。"
 
@@ -88,6 +94,10 @@ func (m *Manager) writeTimeline(ctx context.Context, sess store.Session) error {
 		About:      timelineAbout,
 		DurationMS: sess.VideoDurationMS,
 		Steps:      make([]TimelineStep, 0, len(events)),
+	}
+	if sess.RecordingStartMs > 0 {
+		timeline.RecordingStartMs = sess.RecordingStartMs
+		timeline.RecordingStartedAt = rfc3339(time.UnixMilli(sess.RecordingStartMs))
 	}
 	if _, err := os.Stat(archiveVideo(sess)); err == nil {
 		timeline.Video = filepath.Join("archive", "session.mp4")

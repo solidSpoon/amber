@@ -104,13 +104,16 @@ type Session struct {
 	Assets string
 	// Frame 录像里真正有内容的那块区域（= 应用窗口），零值表示未知。
 	// Display 它所在的虚拟屏；两者不同就说明录进去的桌面比窗口大。
-	Frame           Rect
-	Display         Rect
-	CreatedAt       time.Time
-	StartedAt       time.Time
-	EndedAt         time.Time
-	IdleDeadline    time.Time
-	VideoDurationMS int64
+	Frame        Rect
+	Display      Rect
+	CreatedAt    time.Time
+	StartedAt    time.Time
+	EndedAt      time.Time
+	IdleDeadline time.Time
+	// RecordingStartMs 录像真正开始的墙钟毫秒（容器里 .recording.json 的值）。
+	// 每一步的偏移量都是"相对这个时刻"，所以时间线里必须带上它，否则偏移量只是个数。
+	RecordingStartMs int64
+	VideoDurationMS  int64
 	// Note 会话是怎么结束的（服务端写的一句话，如"会话超时被回收"）。
 	// 它不是本次验收的结论：这个工具只呈现发生了什么，不替人下判断。
 	Note  string
@@ -337,7 +340,7 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 		sess.Payload, sess.Assets,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		sess.CreatedAt.UTC().Format(time.RFC3339Nano), formatTime(sess.StartedAt), formatTime(sess.EndedAt),
-		formatTime(sess.IdleDeadline), sess.VideoDurationMS, sess.Note, sess.Error)
+		formatTime(sess.IdleDeadline), sess.RecordingStartMs, sess.VideoDurationMS, sess.Note, sess.Error)
 	if err != nil {
 		return fmt.Errorf("写入会话失败: %w", err)
 	}
@@ -351,13 +354,13 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 		payload = ?, assets = ?,
 		frame_x = ?, frame_y = ?, frame_w = ?, frame_h = ?, display_w = ?, display_h = ?,
 		started_at = ?, ended_at = ?, idle_deadline = ?,
-		video_duration_ms = ?, note = ?, error = ?
+		recording_start_ms = ?, video_duration_ms = ?, note = ?, error = ?
 		WHERE id = ?`,
 		sess.Container, string(sess.Status), sess.CDPPort, sess.VNCPort,
 		sess.Payload, sess.Assets,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
 		formatTime(sess.StartedAt), formatTime(sess.EndedAt), formatTime(sess.IdleDeadline),
-		sess.VideoDurationMS, sess.Note, sess.Error, sess.ID)
+		sess.RecordingStartMs, sess.VideoDurationMS, sess.Note, sess.Error, sess.ID)
 	if err != nil {
 		return fmt.Errorf("更新会话失败: %w", err)
 	}
@@ -374,7 +377,7 @@ var ErrNotFound = errors.New("记录不存在")
 const sessionColumns = `id, title, app, ref, container, status, cdp_port, vnc_port, slot, dir,
 	payload, assets,
 	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
-	created_at, started_at, ended_at, idle_deadline, video_duration_ms, note, error`
+	created_at, started_at, ended_at, idle_deadline, recording_start_ms, video_duration_ms, note, error`
 
 func scanSession(sc rowScanner) (Session, error) {
 	var (
@@ -389,7 +392,7 @@ func scanSession(sc rowScanner) (Session, error) {
 		&sess.Frame.X, &sess.Frame.Y, &sess.Frame.Width, &sess.Frame.Height,
 		&sess.Display.Width, &sess.Display.Height,
 		&createdAt, &startedAt, &endedAt, &idleDeadline,
-		&sess.VideoDurationMS, &sess.Note, &sess.Error)
+		&sess.RecordingStartMs, &sess.VideoDurationMS, &sess.Note, &sess.Error)
 	if err != nil {
 		return Session{}, err
 	}
