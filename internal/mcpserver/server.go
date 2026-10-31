@@ -220,7 +220,7 @@ func registerActTool(server *mcp.Server, s *Server) {
 			"这一串中间不回到你这边，所以有时效性要求的连招靠它：拖到第 6 秒立刻悬停/断言，不会隔着你思考的那几十秒。" +
 			"动作：click 点元素（ref 或 match 文字或 selector）/ " +
 			"hover 把鼠标停在元素上（悬停才出现的浮层，如词典）/ fill 覆盖填写输入框 / " +
-			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立 / assert 记一条断言。" +
+			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立。" +
 			"press 和 type 走真实键盘输入，页面和原生对话框都收得到。" +
 			"wait_and_capture 的参数是 for（等到成立的 JS 条件）和 timeoutMs；等不到也会把当时的画面带回来。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
@@ -333,13 +333,6 @@ type evalArgs struct {
 	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
 	stepArgs
 	Script string `json:"script" jsonschema:"JS 表达式"`
-}
-
-type assertArgs struct {
-	SessionID string `json:"sessionId" jsonschema:"会话 ID"`
-	Claim     string `json:"claim" jsonschema:"断言内容：一句能被验证的话，例如「字幕在 12.5s 出现」"`
-	OK        bool   `json:"ok" jsonschema:"断言是否成立"`
-	Evidence  string `json:"evidence,omitempty" jsonschema:"证据：DOM 片段、数值、日志行。会原样进报告，供人复核"`
 }
 
 type actionResult struct {

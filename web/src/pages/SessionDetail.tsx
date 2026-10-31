@@ -77,7 +77,6 @@ export default function SessionDetail({ id }: { id: string }) {
     }
   }
 
-  const asserts = events.filter((e) => e.kind === 'assert');
   const failures = events.filter((e) => !e.ok);
   const lastOffset = events.reduce((max, e) => Math.max(max, e.videoOffsetMs), 0);
 
@@ -98,11 +97,6 @@ export default function SessionDetail({ id }: { id: string }) {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>{formatAgo(session.createdAt)}</span>
           <span>{events.length} 步</span>
-          {asserts.length > 0 && (
-            <span>
-              {asserts.length} 条断言（{asserts.filter((a) => a.ok).length} 成立）
-            </span>
-          )}
           {failures.length > 0 && <span className="text-destructive">{failures.length} 步失败</span>}
           {lastOffset > 0 && <span>录像 {formatClock(lastOffset / 1000)}</span>}
           {session.display && (

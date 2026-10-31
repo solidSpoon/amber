@@ -262,14 +262,6 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 	return result, err
 }
 
-// doAssert 记一条断言。
-func (s *Server) doAssert(ctx context.Context, a assertArgs) error {
-	if strings.TrimSpace(a.Claim) == "" {
-		return errors.New("claim 不能为空")
-	}
-	return s.manager.Assert(ctx, a.SessionID, a.Claim, a.OK, a.Evidence)
-}
-
 // ---- 批 -------------------------------------------------------------------
 
 const (
@@ -296,9 +288,6 @@ type batchStep struct {
 	For       string  `json:"for,omitempty"`
 	TimeoutMS int     `json:"timeoutMs,omitempty"`
 	Label     string  `json:"label,omitempty"`
-	Claim     string  `json:"claim,omitempty"`
-	OK        *bool   `json:"ok,omitempty"`
-	Evidence  string  `json:"evidence,omitempty"`
 	Op        string  `json:"op,omitempty"`
 	Value     string  `json:"value,omitempty"`
 }
@@ -349,19 +338,8 @@ func (s *Server) actStep(ctx context.Context, sid string, st batchStep) (string,
 	case "wait":
 		msg, err := s.doWait(ctx, waitArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
 		return msg, stepExtra{}, err
-	case "assert":
-		if st.OK == nil {
-			return "", stepExtra{}, errors.New("assert 必须给 ok")
-		}
-		if err := s.doAssert(ctx, assertArgs{SessionID: sid, Claim: st.Claim, OK: *st.OK, Evidence: st.Evidence}); err != nil {
-			return "", stepExtra{}, err
-		}
-		if *st.OK {
-			return "断言已记录 ✅：" + st.Claim, stepExtra{}, nil
-		}
-		return "断言已记录 ❌：" + st.Claim, stepExtra{}, nil
 	default:
-		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：click/hover/fill/press/type/eval/wait/assert）", st.Action)
+		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：click/hover/fill/press/type/eval/wait/wait_and_capture）", st.Action)
 	}
 }
 

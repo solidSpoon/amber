@@ -265,22 +265,3 @@ type assertRequest struct {
 	OK       bool   `json:"ok"`
 	Evidence string `json:"evidence"`
 }
-
-// actionAssert 把一条断言写进报告：✅ 还是 ❌ 由调用方给，不是由工具调用成败决定。
-func (s *Server) actionAssert(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var req assertRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("请求体不是合法 JSON: %w", err))
-		return
-	}
-	if strings.TrimSpace(req.Claim) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("claim 不能为空"))
-		return
-	}
-	if err := s.manager.Assert(r.Context(), id, req.Claim, req.OK, req.Evidence); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, actionResponse{OK: true, Message: "断言已记录"})
-}

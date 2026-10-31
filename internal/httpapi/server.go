@@ -107,7 +107,6 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}/video", s.serveVideo)
 		api.Get("/sessions/{id}/poster", s.servePoster)
 		api.Get("/sessions/{id}/events/{seq}/clip", s.serveClip)
-		api.Post("/sessions/{id}/assert", s.actionAssert)
 		// 用通配符而不是单段参数：产物路径带目录（shots/x.jpg、screenshots/x.png）
 		api.Get("/sessions/{id}/artifacts/*", s.serveArtifact)
 		api.Get("/sessions/stream", s.streamSessions)

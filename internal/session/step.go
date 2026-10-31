@@ -295,31 +295,6 @@ func clipWindow(target store.Event) (startMS, lengthMS int64) {
 // 保证 store.Event 里的字段在本包里都用到（避免只加了一半）。
 var _ = store.Event{}.Shot
 
-// Assert 记录一条断言（报告里的 ✅/❌）。
-//
-// 断言和动作走同一条闸门，区别只有两点：kind=assert，以及成败由 claim 决定
-// 而不是由「工具调用有没有报错」决定——断言不成立本来就是正常结果。
-func (m *Manager) Assert(ctx context.Context, id, claim string, passed bool, evidence string) error {
-	step := Step{
-		Tool:   "assert",
-		Kind:   "assert",
-		Args:   map[string]any{"claim": claim, "ok": passed, "evidence": evidence},
-		Passed: &passed,
-		// 断言不再额外写 intent：claim 本身就是报告里那句话，重复一遍只是噪音
-	}
-	msg := "断言成立"
-	if !passed {
-		msg = "断言不成立"
-	}
-	if evidence != "" {
-		msg += "：" + truncateString(evidence, 300)
-	}
-	_, _, err := m.Record(ctx, id, step, func(context.Context, Inspector) (string, string, error) {
-		return msg, "", nil
-	})
-	return err
-}
-
 // Clip 返回某一步前后各 2 秒的短视频路径（按需切片并缓存）。
 //
 // 为什么是懒切片：报告里没人看的那一步不该在收尾时花时间编码。
