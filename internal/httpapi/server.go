@@ -37,8 +37,6 @@ import (
 type MCPInfo struct {
 	// HTTPURL 远程接入地址（Streamable HTTP）。
 	HTTPURL string
-	// Token 访问令牌（Authorization: Bearer）。
-	Token string
 	// Command stdio 方式的启动命令。
 	Command []string
 	// Env stdio 方式需要带的环境变量。

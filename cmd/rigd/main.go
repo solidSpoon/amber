@@ -105,17 +105,12 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 	if err != nil {
 		logger.Warn("读取 MCP 工具清单失败，页面将不显示工具列表", "err", err)
 	}
-	token, err := cfg.LoadOrCreateMCPToken()
-	if err != nil {
-		logger.Error("准备 MCP 令牌失败", "err", err)
-		os.Exit(1)
-	}
 	mcpURL := fmt.Sprintf("http://%s/mcp", advertisedAddr(cfg.Addr))
 
 	api := httpapi.New(httpapi.Options{
 		Config: cfg, Store: st, Manager: manager, WebFS: webFS, Log: logger,
 		MCP: httpapi.MCPInfo{
-			HTTPURL: mcpURL, Token: token, HTTPEnabled: true, Tools: mcpTools,
+			HTTPURL: mcpURL, HTTPEnabled: true, Tools: mcpTools,
 			Command: []string{"rigd", "--mcp"},
 			Env: map[string]string{
 				"RIGD_DATA_DIR":        cfg.DataDir,
@@ -149,8 +144,9 @@ func runHTTP(ctx context.Context, cfg *config.Config, st *store.Store, manager *
 
 	router := api.Handler()
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", httpapi.Guard(token, httpapi.NewMCPHandler(mcpServer)))
-	mux.Handle("/mcp/", httpapi.Guard(token, httpapi.NewMCPHandler(mcpServer)))
+	// 内网自用，不设令牌：边界在网络层，不在应用层
+	mux.Handle("/mcp", httpapi.NewMCPHandler(mcpServer))
+	mux.Handle("/mcp/", httpapi.NewMCPHandler(mcpServer))
 	mux.Handle("/", router)
 
 	server := &http.Server{

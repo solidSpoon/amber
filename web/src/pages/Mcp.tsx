@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { CopyIcon, EyeIcon, EyeOffIcon } from 'lucide-react';
+import { CopyIcon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -18,7 +18,6 @@ interface ToolInfo {
 interface McpInfo {
   httpEnabled: boolean;
   httpUrl: string;
-  token: string;
   stdio: { command: string[]; env: Record<string, string> };
   tools: ToolInfo[];
 }
@@ -42,7 +41,6 @@ export default function Mcp() {
   const [info, setInfo] = useState<McpInfo | null>(null);
   const [error, setError] = useState('');
   const [client, setClient] = useState<Client>('claude');
-  const [reveal, setReveal] = useState(false);
 
   useEffect(() => {
     fetch('/api/mcp')
@@ -71,8 +69,6 @@ export default function Mcp() {
     );
   }
 
-  const masked = reveal ? info.token : `${info.token.slice(0, 8)}${'•'.repeat(20)}`;
-
   return (
     <div className="flex max-w-4xl flex-col gap-6">
       <PageHeader
@@ -83,19 +79,10 @@ export default function Mcp() {
       <Card>
         <CardHeader>
           <CardTitle>连接地址</CardTitle>
-          <CardDescription>本机直连免令牌；跨机器必须带 Bearer 令牌。</CardDescription>
+          <CardDescription>内网直连即可，不需要令牌；别把它暴露到公网。</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <Row label="HTTP 端点" value={info.httpUrl} />
-          <div className="flex items-center gap-2">
-            <span className="w-20 shrink-0 text-xs text-muted-foreground">访问令牌</span>
-            <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">{masked}</code>
-            <Button variant="ghost" size="xs" onClick={() => setReveal(!reveal)}>
-              {reveal ? <EyeOffIcon data-icon="inline-start" /> : <EyeIcon data-icon="inline-start" />}
-              {reveal ? '隐藏' : '显示'}
-            </Button>
-            <CopyButton text={info.token} label="复制" />
-          </div>
         </CardContent>
       </Card>
 
@@ -234,10 +221,7 @@ function buildSnippet(client: Client, info: McpInfo): string {
       .join(' \\\n  ');
     return `${envs} \\\n  ${[stdio.command, ...stdio.args].join(' ')}`;
   }
-  const server = {
-    url: info.httpUrl,
-    headers: { Authorization: `Bearer ${info.token}` },
-  };
+  const server = { url: info.httpUrl };
   if (client === 'vscode') {
     return JSON.stringify({ servers: { rigd: { type: 'http', ...server } } }, null, 2);
   }
