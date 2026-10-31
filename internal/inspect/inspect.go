@@ -1,20 +1,17 @@
 // Package inspect 在 cdp 之上实现「验收真正需要的几个动作」：
-// 读页面结构、按引用点击、输入、按键、截图。
+// 读页面结构、按引用点击、输入、按键、框选元素。
 //
 // 设计原则：
 //   - 每个动作都返回结构化结果，方便控制面把参数/结果写进审计；
 //   - 元素引用号（ref）由快照分配并在下一次快照前保持有效，避免让模型拼选择器；
-//   - 截图落盘由调用方给路径，本包不关心目录结构。
+//   - 截图不在这里拍：证据是整块屏幕（含原生对话框），由 session 层对着虚拟屏抓帧。
 package inspect
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -191,7 +188,7 @@ const locateScript = `(() => {
 
 // Locate 按文字或选择器找元素，并登记成一个引用号。
 //
-// 登记之后它和 snapshot 给的引用完全一样：点击、填写、截图高亮、报告里那句
+// 登记之后它和 snapshot 给的引用完全一样：点击、填写、截图高亮、记录里那句
 // 「点击「Skip」按钮」都走同一条路，不会多出第二套"按文字点"的实现。
 func (c *Client) Locate(ctx context.Context, match, selector string) (string, error) {
 	if match == "" && selector == "" {
@@ -305,44 +302,11 @@ func (c *Client) Evaluate(ctx context.Context, script string) (json.RawMessage, 
 	return c.cdp.Evaluate(ctx, script)
 }
 
-// PreviewJPEG 只取一帧 JPEG（不落盘），给看板的实时预览用。
-func (c *Client) PreviewJPEG(ctx context.Context, quality int) ([]byte, error) {
-	// 看板上的缩略屏最大 960 宽就够了，再大既看不清也用不上
-	data, err := c.cdp.ScreenshotJPEG(ctx, quality)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := base64.StdEncoding.DecodeString(data)
-	if err != nil {
-		return nil, fmt.Errorf("解码预览帧失败: %w", err)
-	}
-	return raw, nil
-}
-
-// Screenshot 截图并落盘，返回写入的字节数。
-func (c *Client) Screenshot(ctx context.Context, path string) (int64, error) {
-	data, err := c.cdp.Screenshot(ctx)
-	if err != nil {
-		return 0, err
-	}
-	raw, err := base64.StdEncoding.DecodeString(data)
-	if err != nil {
-		return 0, fmt.Errorf("解码截图失败: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return 0, fmt.Errorf("创建截图目录失败: %w", err)
-	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
-		return 0, fmt.Errorf("写入截图失败: %w", err)
-	}
-	return int64(len(raw)), nil
-}
-
 // Summarize 把快照压成一段适合塞进上下文的文本。
 func Summarize(s Snapshot) string {
 	var b strings.Builder
 	// 这里只写人看得懂的东西：页面叫什么、有哪些能点的元素。
-	// 地址栏那种路径信息对读者没有意义，报告里出现只会让人分心。
+	// 地址栏那种路径信息对读者没有意义，记录里出现只会让人分心。
 	fmt.Fprintf(&b, "页面：%s（%d 个可操作元素）\n\n", s.Title, len(s.Elements))
 	for _, el := range s.Elements {
 		fmt.Fprintf(&b, "%s %s", el.Ref, el.Role)
@@ -359,37 +323,24 @@ func Summarize(s Snapshot) string {
 	return b.String()
 }
 
-// StepJPEG 截「这一步」的画面：先把元素框高亮出来再截，截图完成立刻撤掉高亮。
+// Highlight 在页面上把某个元素框出来（Steps Recorder 那个红圈）。
 //
-// 这就是 Steps Recorder 那个红圈的作用——报告里一眼看出这一步点的是哪儿，
-// 而不是让人对着整屏截图自己找。宽度压到 960：报告里显示得够清楚，
-// 体积只有全尺寸 PNG 的六分之一左右。
-func (c *Client) StepJPEG(ctx context.Context, path, ref string) (int64, error) {
-	if ref != "" {
-		if el, err := c.Resolve(ref); err == nil {
-			if _, err := c.cdp.Evaluate(ctx, highlightScript(el)); err == nil {
-				// 等一帧再截：刚插入的覆盖层可能还没合成，截出来会缺框
-				time.Sleep(80 * time.Millisecond)
-			}
-			defer func() { _, _ = c.cdp.Evaluate(context.WithoutCancel(ctx), clearHighlightScript) }()
-		}
+// 框是页面里的一个覆盖层，所以整屏抓帧会把它一起拍进去。
+func (c *Client) Highlight(ctx context.Context, ref string) error {
+	el, err := c.Resolve(ref)
+	if err != nil {
+		return err
 	}
+	if _, err := c.cdp.Evaluate(ctx, highlightScript(el)); err != nil {
+		return fmt.Errorf("框选元素失败: %w", err)
+	}
+	return nil
+}
 
-	data, err := c.cdp.ScreenshotJPEG(ctx, 85)
-	if err != nil {
-		return 0, err
-	}
-	raw, err := base64.StdEncoding.DecodeString(data)
-	if err != nil {
-		return 0, fmt.Errorf("解码步骤截图失败: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return 0, fmt.Errorf("创建步骤截图目录失败: %w", err)
-	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
-		return 0, fmt.Errorf("写入步骤截图失败: %w", err)
-	}
-	return int64(len(raw)), nil
+// ClearHighlight 撤掉框。调用方自己决定什么时候收尾（抓完帧）。
+func (c *Client) ClearHighlight(ctx context.Context) error {
+	_, err := c.cdp.Evaluate(ctx, clearHighlightScript)
+	return err
 }
 
 // Describe 取引用对应的元素（给这一步自动写一句人话用）。

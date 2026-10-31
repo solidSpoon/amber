@@ -73,7 +73,7 @@ export default function Mcp() {
     <div className="flex max-w-4xl flex-col gap-6">
       <PageHeader
         title="MCP 接入"
-        description="把验收能力交给任意支持 MCP 的 AI：模型和 key 留在你自己的客户端里，这里只提供机器与工具。"
+        description="把一台机器交给任意支持 MCP 的 AI：模型和 key 留在你自己的客户端里，这里只提供机器与工具。"
       />
 
       <Card>

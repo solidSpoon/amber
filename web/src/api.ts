@@ -13,6 +13,8 @@ export interface Geometry {
 
 export interface Session {
   id: string;
+  /** 这次验收的意图（一句话）：列表和记录顶部当标题 */
+  title?: string;
   app: string;
   ref: string;
   commitSha?: string;
@@ -49,6 +51,8 @@ export interface SessionEvent {
   /** 这一段连续操作的起止（毫秒，相对录像起点）；同一批的几步共用一条片段 */
   batchStartMs: number;
   batchEndMs: number;
+  /** 这一段操作为什么做（run 的 intent）：记录里当这一段的小标题 */
+  batchIntent?: string;
   seq: number;
   at: string;
   tool: string;
@@ -114,7 +118,7 @@ export interface RuntimeInfo {
   idleTimeout: string;
 }
 
-/** AI 用完工作流后留下的建议（产品改进输入，不属于验收证据） */
+/** AI 用完工作流后留下的意见（产品改进输入，不属于验收证据） */
 export interface Feedback {
   id: number;
   at: string;

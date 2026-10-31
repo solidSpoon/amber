@@ -19,9 +19,9 @@ export function StatusBadge({ status }: { status: SessionStatus }) {
 }
 
 const VERDICT = {
-  pass: { label: '通过', variant: 'success' as const },
-  fail: { label: '不通过', variant: 'destructive' as const },
-  inconclusive: { label: '无法判定', variant: 'warning' as const },
+  pass: { label: '成立', variant: 'success' as const },
+  fail: { label: '不成立', variant: 'destructive' as const },
+  inconclusive: { label: '看不出', variant: 'warning' as const },
 };
 
 /** 结论徽章：没给结论时留一个占位横线，避免表格出现空洞 */

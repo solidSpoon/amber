@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { BookOpenIcon, ListChecksIcon, MonitorPlayIcon, PlugIcon } from 'lucide-react';
-import { buttonVariants } from '@/components/ui/button';
+import { BookOpenIcon, ListChecksIcon, MessageSquareTextIcon, MonitorPlayIcon, PlugIcon } from 'lucide-react';
 import { Toaster } from '@/components/ui/sonner';
 import { cn } from '@/lib/utils';
 import Dashboard from './pages/Dashboard';
+import FeedbackPage from './pages/Feedback';
 import Mcp from './pages/Mcp';
 import ProductDoc from './pages/ProductDoc';
 import Sessions from './pages/Sessions';
@@ -15,6 +15,7 @@ type Route =
   | { name: 'dashboard' }
   | { name: 'sessions' }
   | { name: 'session'; id: string }
+  | { name: 'feedback' }
   | { name: 'mcp' }
   | { name: 'docs' };
 
@@ -22,6 +23,7 @@ function parseRoute(hash: string): Route {
   const clean = hash.replace(/^#\/?/, '');
   if (clean.startsWith('sessions/')) return { name: 'session', id: clean.slice('sessions/'.length) };
   if (clean === 'sessions') return { name: 'sessions' };
+  if (clean === 'feedback') return { name: 'feedback' };
   if (clean === 'mcp') return { name: 'mcp' };
   if (clean === 'docs') return { name: 'docs' };
   return { name: 'dashboard' };
@@ -29,7 +31,8 @@ function parseRoute(hash: string): Route {
 
 const NAV = [
   { href: '#/', label: '看板', key: 'dashboard', icon: MonitorPlayIcon },
-  { href: '#/sessions', label: '验收会话', key: 'sessions', icon: ListChecksIcon },
+  { href: '#/sessions', label: '会话', key: 'sessions', icon: ListChecksIcon },
+  { href: '#/feedback', label: '反馈', key: 'feedback', icon: MessageSquareTextIcon },
   { href: '#/mcp', label: 'MCP 接入', key: 'mcp', icon: PlugIcon },
   // 产品文档排在最后：它是"依据"，不是日常操作入口
   { href: '#/docs', label: '产品文档', key: 'docs', icon: BookOpenIcon },
@@ -53,10 +56,16 @@ export default function App() {
         key={item.href}
         href={item.href}
         aria-current={active ? 'page' : undefined}
+        // 不再借 buttonVariants：它的 padding 会跟这里的 px-3.5 打架（同特异性比的是输出顺序，
+        // 谁在后谁赢，结果导航项的图标缩进变成 6px）。导航项样式自己写，反而干净。
         className={cn(
-          buttonVariants({ variant: 'ghost', size: 'sm' }),
-          'justify-start',
-          active ? 'bg-muted text-foreground' : 'text-muted-foreground',
+          'flex h-10 items-center gap-2.5 rounded-md px-3.5 text-[0.8125rem] font-medium transition-colors',
+          'outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
+          // 选中态必须把 hover 也写死，否则鼠标一放上去底色会被 hover 覆盖，
+          // 看起来像"选中丢了"——这正是之前那个怪象
+          active
+            ? 'bg-primary/12 text-primary hover:bg-primary/18 hover:text-primary'
+            : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
         )}
       >
         <Icon data-icon="inline-start" />
@@ -71,15 +80,24 @@ export default function App() {
     // 窄屏（手机/竖屏窗口）把侧边栏收成顶部一条横向导航，否则正文只剩一百多像素。
     <div className="flex h-svh flex-col overflow-hidden bg-background text-foreground md:flex-row">
       <aside className="hidden h-full w-60 shrink-0 flex-col gap-6 overflow-y-auto border-r bg-sidebar p-4 md:flex">
-        <div className="flex flex-col gap-0.5 px-2 pt-1">
-          <span className="text-base font-semibold tracking-tight">rigd</span>
-          <span className="text-xs text-muted-foreground">一次性 GUI 验收控制台</span>
+        {/* px-3.5 和下面的导航项对齐：导航项的图标缩进也是 3.5，这样 logo 的图形
+            和导航图标在同一条竖线上，不然 logo 会往左顶出去半个字 */}
+        <div className="flex items-center gap-2.5 px-3.5 pt-1">
+          {/* 品牌图形直接用图标那一份，页面和 Dock 里是同一块琥珀 */}
+          <img src="/amber.svg" alt="" width={28} height={28} className="size-7 shrink-0" />
+          <span className="flex flex-col gap-0.5">
+            <span className="text-base font-semibold tracking-tight">Amber</span>
+            <span className="text-xs text-muted-foreground">给 AI 的一次性机器</span>
+          </span>
         </div>
         <nav className="flex flex-col gap-1">{links}</nav>
       </aside>
 
       <nav className="flex shrink-0 items-center gap-1 overflow-x-auto border-b bg-sidebar px-3 py-2 md:hidden">
-        <span className="mr-2 shrink-0 text-sm font-semibold tracking-tight">rigd</span>
+        <span className="mr-2 flex shrink-0 items-center gap-1.5">
+          <img src="/amber.svg" alt="" width={20} height={20} className="size-5" />
+          <span className="text-sm font-semibold tracking-tight">Amber</span>
+        </span>
         {links}
       </nav>
 
@@ -87,6 +105,7 @@ export default function App() {
         {route.name === 'dashboard' && <Dashboard />}
         {route.name === 'sessions' && <Sessions />}
         {route.name === 'session' && <SessionDetail id={route.id} />}
+        {route.name === 'feedback' && <FeedbackPage />}
         {route.name === 'mcp' && <Mcp />}
         {route.name === 'docs' && <ProductDoc />}
       </main>

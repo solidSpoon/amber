@@ -495,3 +495,63 @@ func TestStartRejectsPathOutsideWorkspace(t *testing.T) {
 		t.Fatalf("校验失败时不应起容器: %v", fake.runSpecs)
 	}
 }
+
+// 可写素材槽位：挂载要 rw，而且必须是真复制——硬链接会让容器里的写入
+// 直接改掉宿主上的原件，下一次验收的输入就不一样了。
+func TestStartMountsWritableAssetAsCopy(t *testing.T) {
+	ctx := context.Background()
+	m, _, fake, _ := newTestManager(t)
+
+	payloadDir := filepath.Join(t.TempDir(), "writable")
+	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+		t.Fatalf("创建产物目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(payloadDir, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("写入口失败: %v", err)
+	}
+	recipe := `{"name":"w","entry":"run.sh","assets":[{"name":"media","path":"/library","writable":true}]}`
+	if err := os.WriteFile(filepath.Join(payloadDir, "rig.json"), []byte(recipe), 0o644); err != nil {
+		t.Fatalf("写 rig.json 失败: %v", err)
+	}
+
+	mediaDir := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		t.Fatalf("创建素材目录失败: %v", err)
+	}
+	src := filepath.Join(mediaDir, "clip.mp4")
+	if err := os.WriteFile(src, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("写素材失败: %v", err)
+	}
+
+	if _, err := m.Start(ctx, Options{
+		Payload: "dir:" + payloadDir,
+		Assets:  map[string]string{"media": "dir:" + mediaDir},
+	}); err != nil {
+		t.Fatalf("起会话失败: %v", err)
+	}
+
+	var mediaSource string
+	for _, mount := range fake.runSpecs[0].Mounts {
+		if mount.ContainerPath == "/library" {
+			if mount.ReadOnly {
+				t.Fatalf("声明了 writable 的槽位必须可写: %+v", mount)
+			}
+			mediaSource = mount.Source
+		}
+	}
+	if mediaSource == "" {
+		t.Fatalf("素材槽位没有挂到 /library: %+v", fake.runSpecs[0].Mounts)
+	}
+
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("读源文件失败: %v", err)
+	}
+	dstInfo, err := os.Stat(filepath.Join(mediaSource, "clip.mp4"))
+	if err != nil {
+		t.Fatalf("读快照文件失败: %v", err)
+	}
+	if os.SameFile(srcInfo, dstInfo) {
+		t.Fatal("可写素材不能用硬链接：写容器里会改掉宿主上的原件")
+	}
+}

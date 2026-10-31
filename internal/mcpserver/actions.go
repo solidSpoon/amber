@@ -4,13 +4,15 @@ package mcpserver
 //
 // 每个动作只有一份实现：顶层工具和 batch 都走这里。
 // 这样批里的第 3 步和第 3 次单独调用是同一段代码、同一条记录路径，
-// 报告里看不出区别，也不会出现"批里能做的事单独调做不了"这种分叉。
+// 记录里看不出区别，也不会出现"批里能做的事单独调做不了"这种分叉。
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,32 +23,90 @@ import (
 	"github.com/solidSpoon/rigd/internal/store"
 )
 
-// doSnapshot 读页面结构。
-func (s *Server) doSnapshot(ctx context.Context, a sessionArgs) (inspect.Snapshot, []byte, error) {
+// doCapture 看一眼当前界面，并把这一眼记成记录里的一步。
+//
+// 工具 capture 和 run 的最后一步都走这里：同一个动作、同一份记录路径。
+// 画面是整块屏幕（session 层对着虚拟屏抓帧），所以原生对话框、系统菜单也在里面。
+func (s *Server) doCapture(ctx context.Context, a captureArgs) (inspect.Snapshot, string, []byte, error) {
 	var snap inspect.Snapshot
-	var shot []byte
-	_, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
-		Tool: "snapshot", Args: map[string]any{}, Intent: a.Intent, Expect: a.Expect,
+	step, result, _, err := s.manager.RecordStep(ctx, a.SessionID, session.Step{
+		Tool:       "capture",
+		Args:       map[string]any{"for": a.For, "timeoutMs": a.TimeoutMS},
+		Intent:     a.Intent,
+		Expect:     a.Expect,
+		AlwaysShot: true,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
+		// 等不到条件不算这一步失败：capture 的价值是"留下当时的样子"，
+		// 没等到就照实说明没等到，画面照样带回去。
+		waited, waitErr := waitForCondition(ctx, insp, a.For, a.TimeoutMS, defaultCaptureWait)
+		if waitErr != nil && ctx.Err() != nil {
+			return "", "", waitErr
+		}
 		got, err := insp.Snapshot(ctx)
 		if err != nil {
 			return "", "", err
 		}
 		snap = got
-		// 顺手取一帧画面：看结构能知道"有什么"，看画面才知道"长什么样"
-		if previewer, ok := insp.(interface {
-			PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
-		}); ok {
-			if raw, err := previewer.PreviewJPEG(ctx, 70); err == nil {
+		text := inspect.Summarize(got)
+		switch {
+		case waitErr != nil:
+			text = fmt.Sprintf("没等到「%s」（等了 %.1f 秒），下面是当时的界面。\n", a.For, waited.Seconds()) + text
+		case waited > 0:
+			text = fmt.Sprintf("等 %.1f 秒后界面稳定。\n", waited.Seconds()) + text
+		}
+		return text, "", nil
+	})
+	if err != nil {
+		return inspect.Snapshot{}, "", nil, err
+	}
+	// 记录里那张图就是回给模型的这张：一次抓帧，两处用同一份证据。
+	var shot []byte
+	if step.Shot != "" {
+		if sess, gerr := s.manager.Get(ctx, a.SessionID); gerr == nil && sess.Dir != "" {
+			if raw, rerr := os.ReadFile(filepath.Join(sess.Dir, step.Shot)); rerr == nil {
 				shot = raw
 			}
 		}
-		return inspect.Summarize(got), "", nil
-	})
-	if err != nil {
-		return inspect.Snapshot{}, nil, err
 	}
-	return snap, shot, nil
+	return snap, result, shot, nil
+}
+
+// waitForCondition 轮询一个 JS 条件，返回等了多久（没给条件就是 0 秒、不等待）。
+func waitForCondition(ctx context.Context, insp session.Inspector, expr string, timeoutMS, def int) (time.Duration, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return 0, nil
+	}
+	timeout := time.Duration(timeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = time.Duration(def) * time.Millisecond
+	}
+	if timeout > time.Minute {
+		timeout = time.Minute
+	}
+	started := time.Now()
+	var lastErr error
+	for {
+		raw, evalErr := insp.Evaluate(ctx, "Boolean("+expr+")")
+		if evalErr != nil {
+			// 元素还没出现时求值会抛错，这本身就是"还没到"，继续等
+			lastErr = evalErr
+		} else if strings.TrimSpace(string(raw)) == "true" {
+			return time.Since(started), nil
+		}
+		if time.Since(started) >= timeout {
+			msg := fmt.Sprintf("等待超时（%s）：%s", timeout, expr)
+			if lastErr != nil {
+				msg += "；最后一次求值错误：" + lastErr.Error()
+			}
+			return time.Since(started), errors.New(msg)
+		}
+		select {
+		case <-ctx.Done():
+			return time.Since(started), ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // locator 能"现找元素"的检查器（测试里的假实现不实现，按能力探测）。
@@ -91,7 +151,7 @@ func (s *Server) doClick(ctx context.Context, a clickArgs) (string, error) {
 			if err := insp.Click(ctx, a.Ref); err != nil {
 				return "", "", err
 			}
-			// 报告里写元素的名字，不写引用号：读者不认识 q1/e5
+			// 记录里写元素的名字，不写引用号：读者不认识 q1/e5
 			if el, ok := s.manager.Describe(insp, a.Ref); ok && el.Name != "" {
 				return "已点击「" + el.Name + "」", "", nil
 			}
@@ -218,10 +278,13 @@ func (s *Server) doEval(ctx context.Context, a evalArgs) (string, any, error) {
 //
 // 为什么放在服务端等：等界面稳定这件事一旦交给模型，中间就是几十秒的思考，
 // 等到再来截图时画面早就不是那一刻了。
+//
+// 和 sleep 严格分工：wait 只等条件（等不到 = 这一步失败），sleep 只等时间（不会失败）。
+// 两者不接受对方的参数，写混了直接报错——省得调用方拿 for:"true" 假装睡眠。
 func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 	expr := strings.TrimSpace(a.For)
 	if expr == "" {
-		return "", errors.New("for 不能为空：写一个等它成立的 JS 条件")
+		return "", errors.New("wait 需要 for（等它成立的 JS 条件）；只想等一段时间请改用 sleep")
 	}
 	timeout := time.Duration(a.TimeoutMS) * time.Millisecond
 	if timeout <= 0 {
@@ -231,65 +294,75 @@ func (s *Server) doWait(ctx context.Context, a waitArgs) (string, error) {
 		timeout = time.Minute
 	}
 
-	var lastErr error
-	result, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+	var waited time.Duration
+	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
 		Tool: "wait", Args: map[string]any{"for": expr, "timeoutMs": timeout.Milliseconds()},
 		Intent: a.Intent, Expect: a.Expect,
 	}, func(ctx context.Context, insp session.Inspector) (string, string, error) {
-		started := time.Now()
-		for {
-			raw, evalErr := insp.Evaluate(ctx, "Boolean("+expr+")")
-			if evalErr != nil {
-				// 元素还没出现时求值会抛错，这本身就是"还没到"，继续等
-				lastErr = evalErr
-			} else if strings.TrimSpace(string(raw)) == "true" {
-				return fmt.Sprintf("条件成立（等了 %.1f 秒）", time.Since(started).Seconds()), "", nil
-			}
-			if time.Since(started) >= timeout {
-				msg := fmt.Sprintf("等待超时（%s）：%s", timeout, expr)
-				if lastErr != nil {
-					msg += "；最后一次求值错误：" + lastErr.Error()
-				}
-				return "", "", errors.New(msg)
-			}
-			select {
-			case <-ctx.Done():
-				return "", "", ctx.Err()
-			case <-time.After(100 * time.Millisecond):
-			}
+		elapsed, werr := waitForCondition(ctx, insp, expr, a.TimeoutMS, 5000)
+		waited = elapsed
+		if werr != nil {
+			return "", "", werr
 		}
+		return fmt.Sprintf("条件成立（等了 %.1f 秒）", elapsed.Seconds()), "", nil
 	})
-	return result, err
+	_ = waited
+	return msg, err
+}
+
+// doSleep 等一段固定时间。
+//
+// 它不是"没写好的 wait"：动画、限流、防抖这些场景就是需要一段确定的时长，
+// 而且它不该因为"条件没成立"而失败。要等条件成立用 wait。
+func (s *Server) doSleep(ctx context.Context, a sleepArgs) (string, error) {
+	if a.MS <= 0 {
+		return "", errors.New("sleep 需要 ms（要等多少毫秒，1~60000）；等条件成立请改用 wait")
+	}
+	if a.MS > 60000 {
+		return "", fmt.Errorf("sleep 最多 60000 毫秒（收到 %d）", a.MS)
+	}
+	waited := time.Duration(a.MS) * time.Millisecond
+	msg, _, err := s.manager.Record(ctx, a.SessionID, session.Step{
+		Tool: "sleep", Args: map[string]any{"ms": a.MS}, Intent: a.Intent, Expect: a.Expect,
+	}, func(ctx context.Context, _ session.Inspector) (string, string, error) {
+		select {
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		case <-time.After(waited):
+		}
+		return fmt.Sprintf("等了 %d 毫秒", a.MS), "", nil
+	})
+	return msg, err
 }
 
 // ---- 批 -------------------------------------------------------------------
 
 const (
 	maxActSteps = 50
-	actTimeout  = 2 * time.Minute
+	// defaultCaptureWait capture 没写 timeoutMs 时的等待上限
+	defaultCaptureWait = 3000
 )
 
 // batchStep 批里的一步：动作名 + 该动作自己的参数。
 //
 // 故意做成扁平结构而不是嵌套 JSON：模型写错一层就整个批跑不了，
-// 扁平至少能一眼看出哪一项写错了。
+// 扁平至少能一眼看出哪一项写错了。每个动作需要哪些字段写在 action 的说明里，
+// 执行前还有一道自检（见 validateStep），缺什么当场说缺什么。
 type batchStep struct {
-	Action string `json:"action" jsonschema:"动作：click/hover/fill/press/type/eval/wait/assert；最后一步必须是 wait_and_capture"`
+	Action string `json:"action" jsonschema:"动作，见工具说明的对照表：click/hover/fill/press/type/eval/wait/sleep/capture"`
 	stepArgs
 
-	Ref       string  `json:"ref,omitempty"`
-	Match     string  `json:"match,omitempty"`
-	Selector  string  `json:"selector,omitempty"`
-	X         float64 `json:"x,omitempty"`
-	Y         float64 `json:"y,omitempty"`
-	Text      string  `json:"text,omitempty"`
-	Key       string  `json:"key,omitempty"`
-	Script    string  `json:"script,omitempty"`
-	For       string  `json:"for,omitempty"`
-	TimeoutMS int     `json:"timeoutMs,omitempty"`
-	Label     string  `json:"label,omitempty"`
-	Op        string  `json:"op,omitempty"`
-	Value     string  `json:"value,omitempty"`
+	Ref       string  `json:"ref,omitempty" jsonschema:"click/hover/fill：元素引用号（capture 给的，如 e3）"`
+	Match     string  `json:"match,omitempty" jsonschema:"click/hover/fill：按可见文字找元素（页面刚变、还没有引用号时用）"`
+	Selector  string  `json:"selector,omitempty" jsonschema:"click/hover/fill：按 CSS 选择器找元素"`
+	X         float64 `json:"x,omitempty" jsonschema:"click/hover：页面坐标 X（和 y 一起用，兜底寻找方式）"`
+	Y         float64 `json:"y,omitempty" jsonschema:"click/hover：页面坐标 Y"`
+	Text      string  `json:"text,omitempty" jsonschema:"fill/type：要输入的文字"`
+	Key       string  `json:"key,omitempty" jsonschema:"press：按键名，组合键写成 ctrl+l"`
+	Script    string  `json:"script,omitempty" jsonschema:"eval：在页面里求值的 JS 表达式"`
+	For       string  `json:"for,omitempty" jsonschema:"wait/capture：等它成立的 JS 条件；sleep 不接受这个字段"`
+	MS        int     `json:"ms,omitempty" jsonschema:"sleep：要等多少毫秒（1~60000）；wait 不接受这个字段"`
+	TimeoutMS int     `json:"timeoutMs,omitempty" jsonschema:"wait/capture：最多等多久（毫秒），默认 wait 5000、capture 3000"`
 }
 
 // stepExtra 是某些动作额外要交给模型的东西（元素表、求值结果、要展示的原文）。
@@ -302,13 +375,119 @@ type stepExtra struct {
 	Image []byte
 }
 
+// actionTable 是动作的唯一清单：schema 的 enum、说明文字、自检都从这里来。
+//
+// 放在一处的原因很实际：这三个地方只要各写一份，就一定会漂（描述里有 assert、
+// 代码里没有分支，就是这么来的）。
+var actionTable = []struct {
+	Name string
+	Need string
+}{
+	{"click", "ref 或 match 或 selector 或 x+y"},
+	{"hover", "ref 或 match 或 selector 或 x+y"},
+	{"fill", "ref/match/selector + text"},
+	{"press", "key"},
+	{"type", "text"},
+	{"eval", "script"},
+	{"wait", "for（等条件成立；只想等时间用 sleep）"},
+	{"sleep", "ms（等固定时长；等条件成立用 wait）"},
+	{"capture", "可选 for + timeoutMs"},
+}
+
+// actionNames 给 JSON Schema 的 enum 用。
+func actionNames() []any {
+	names := make([]any, 0, len(actionTable))
+	for _, a := range actionTable {
+		names = append(names, a.Name)
+	}
+	return names
+}
+
+// actionHelp 拼一句「可用动作」的说明，错误信息里也用它。
+func actionHelp() string {
+	parts := make([]string, 0, len(actionTable))
+	for _, a := range actionTable {
+		parts = append(parts, a.Name+"（"+a.Need+"）")
+	}
+	return strings.Join(parts, " / ")
+}
+
+// normalizeAction 把历史名字收进来：同一个动作只对外宣传一个名字。
+//
+// snapshot / wait_and_capture 是 capture 的旧写法（两者本来就返回同一个东西），
+// 留着只为让旧脚本再来一次不至于报错，不再出现在工具清单和说明里。
+func normalizeAction(name string) string {
+	switch name {
+	case "snapshot", "wait_and_capture":
+		return "capture"
+	}
+	return name
+}
+
+// validateStep 在执行前把「字段和动作对不上」的情况说清楚。
+//
+// 为什么不在 schema 里做条件校验：JSON Schema 表达"click 要 ref 或坐标"要么写
+// 一大堆 oneOf，要么做不到；而错误信息本来就需要一句人话，索性在这里一次说完。
+func validateStep(st batchStep) error {
+	point := st.Ref != "" || st.Match != "" || st.Selector != "" || (st.X != 0 && st.Y != 0)
+	switch st.Action {
+	case "click", "hover":
+		if !point {
+			return fmt.Errorf("%s 需要 ref、match/selector 或 x+y 之一", st.Action)
+		}
+	case "fill":
+		if !point {
+			return errors.New("fill 需要 ref、match/selector 之一")
+		}
+		if st.Text == "" {
+			return errors.New("fill 需要 text（要填入的内容）")
+		}
+	case "press":
+		if strings.TrimSpace(st.Key) == "" {
+			return errors.New("press 需要 key（如 Enter、ArrowRight、ctrl+l）")
+		}
+	case "type":
+		if st.Text == "" {
+			return errors.New("type 需要 text（要输入的文字）")
+		}
+	case "eval":
+		if strings.TrimSpace(st.Script) == "" {
+			return errors.New("eval 需要 script（在页面里求值的 JS 表达式）")
+		}
+	case "wait":
+		if strings.TrimSpace(st.For) == "" {
+			return errors.New("wait 需要 for（等它成立的 JS 条件）；只想等一段时间请改用 sleep")
+		}
+		if st.MS != 0 {
+			return errors.New("wait 不接受 ms：要等固定时长请用 sleep")
+		}
+	case "sleep":
+		if st.MS <= 0 {
+			return errors.New("sleep 需要 ms（要等多少毫秒）；等条件成立请用 wait")
+		}
+		if st.For != "" {
+			return errors.New("sleep 不接受 for：要等条件成立请用 wait")
+		}
+		if st.MS > 60000 {
+			return fmt.Errorf("sleep 最多 60000 毫秒（收到 %d）", st.MS)
+		}
+	case "capture":
+		if st.MS != 0 {
+			return errors.New("capture 不接受 ms：它等的是 for 条件；单纯等待请用 sleep")
+		}
+	default:
+		return fmt.Errorf("未知动作 %q；可用动作：%s", st.Action, actionHelp())
+	}
+	return nil
+}
+
 // actStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
 //
 // 动作表刻意正交：一个动作只管一件事，AI 不需要在"该用哪个"上纠结。
 //
-//	snapshot 看状态 / click 点 / hover 悬停 / fill 填输入框
+//	capture 看状态 / click 点 / hover 悬停 / fill 填输入框
 //	press 按键 / type 打字（这两个作用于当前焦点，页面内外通用）
-//	eval 求值 / wait 等条件 / assert 下结论
+//	eval 求值 / wait 等条件 / sleep 等时间
 func (s *Server) actStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
 	base := stepArgs{Intent: st.Intent, Expect: st.Expect}
 	point := clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y}
@@ -338,33 +517,60 @@ func (s *Server) actStep(ctx context.Context, sid string, st batchStep) (string,
 	case "wait":
 		msg, err := s.doWait(ctx, waitArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
 		return msg, stepExtra{}, err
+	case "sleep":
+		msg, err := s.doSleep(ctx, sleepArgs{SessionID: sid, stepArgs: base, MS: st.MS})
+		return msg, stepExtra{}, err
+	case "capture":
+		snap, text, shot, err := s.doCapture(ctx, captureArgs{SessionID: sid, stepArgs: base, For: st.For, TimeoutMS: st.TimeoutMS})
+		if err != nil {
+			return "", stepExtra{}, err
+		}
+		return fmt.Sprintf("界面：%s（%d 个可操作元素）", snap.Title, len(snap.Elements)),
+			stepExtra{Text: text, Elements: snap.Elements, Image: shot}, nil
 	default:
-		return "", stepExtra{}, fmt.Errorf("未知动作 %q（可用：click/hover/fill/press/type/eval/wait/wait_and_capture）", st.Action)
+		return "", stepExtra{}, fmt.Errorf("未知动作 %q；可用动作：%s", st.Action, actionHelp())
 	}
 }
 
 // doAct 连续执行若干步；任何一步失败就停下，并把进度说清楚。
 //
 // 失败不返回 Go error：模型需要知道"跑到第几步、剩下没跑什么"，
-// 用错误把它吞掉反而更糊涂。会话本身的状态在报告里，不靠这里的返回值。
+// 用错误把它吞掉反而更糊涂。会话本身的状态在记录里，不靠这里的返回值。
+//
+// 同理，服务端超时也不返回 error：那只会让客户端拿到一句没有上下文的
+// "MCP tools/call returned an error"。超时照样按正常结果交回已完成的步骤、
+// 停在第几步、以及当时屏幕的样子。
 func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error) {
+	if strings.TrimSpace(a.Intent) == "" {
+		return "", actResult{}, errors.New("run 需要 intent：一句话说清这一批要干什么（记录里当这一段的小标题）")
+	}
 	if len(a.Steps) == 0 {
 		return "", actResult{}, errors.New("steps 不能为空")
 	}
 	if len(a.Steps) > maxActSteps {
 		return "", actResult{}, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxActSteps, len(a.Steps))
 	}
+	for i := range a.Steps {
+		a.Steps[i].Action = normalizeAction(a.Steps[i].Action)
+	}
+	// 先把每一步的字段和动作对一遍：写错的那一步不该等到跑了八步才被发现。
+	for i, st := range a.Steps {
+		if err := validateStep(st); err != nil {
+			return "", actResult{}, fmt.Errorf("第 %d 步（%s）：%w", i+1, st.Action, err)
+		}
+	}
 	// 最后一步必须是收尾动作：等到界面稳定再把画面交回来。
-	// 不这样要求的话，模型会拿"动作刚发出去"的中间状态当结果，验收结论就不可信了。
+	// 不这样要求的话，模型会拿"动作刚发出去"的中间状态当结果，结论就不可信了。
 	last := a.Steps[len(a.Steps)-1]
-	if last.Action != "wait_and_capture" {
+	if last.Action != "capture" {
 		return "", actResult{}, errors.New(
-			"steps 的最后一步必须是 wait_and_capture（参数 for、timeoutMs）：" +
+			"steps 的最后一步必须是 capture（参数 for、timeoutMs）：" +
 				"它是这一批的收尾——等到界面稳定，再把画面和可操作元素带回来")
 	}
 	body := a.Steps[:len(a.Steps)-1]
 
-	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	batchTimeout := s.batchTimeout()
+	ctx, cancel := context.WithTimeout(ctx, batchTimeout)
 	defer cancel()
 
 	// 这一批从哪到哪：切片按这段算，不按单步。
@@ -376,8 +582,27 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 
 	var b strings.Builder
 	res := actResult{Steps: make([]actStepResult, 0, len(body))}
+	started := time.Now()
 	for i, st := range body {
-		msg, extra, err := s.actStep(ctx, a.SessionID, st)
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintf(&b, "停止：整批超过 %s，第 %d 步还没开始。\n", batchTimeout, i+1)
+			res.StoppedAt = i + 1
+			res.OK = false
+			s.captureAfter(ctx, a.SessionID, last, &b, &res)
+			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS, a.Intent)
+			return b.String(), res, nil
+		}
+
+		// 单步看门狗：eval 这类动作可能永远不返回，不能让它拖死整批。
+		stepCtx, stepCancel := context.WithTimeout(ctx, s.stepDeadline(st))
+		msg, extra, err := s.actStep(stepCtx, a.SessionID, st)
+		stepErr := stepCtx.Err()
+		stepCancel()
+		if err != nil && stepErr == context.DeadlineExceeded && ctx.Err() == nil {
+			err = fmt.Errorf("这一步超过 %s 还没返回（脚本挂住了？）；"+
+				"要固定等一段时间用 sleep，要等条件用 wait", s.stepDeadline(st))
+		}
+
 		if err != nil {
 			fmt.Fprintf(&b, "%d. %s ✗ %v\n", i+1, st.Action, err)
 			fmt.Fprintf(&b, "已停止：后面 %d 步没有执行。", len(body)-i-1)
@@ -385,14 +610,14 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 				Index: i + 1, Action: st.Action, OK: false, Text: err.Error(), Elements: extra.Elements, Value: extra.Value,
 			})
 			res.StoppedAt = i + 1
-			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
 			res.OK = false
 			s.captureAfter(ctx, a.SessionID, last, &b, &res)
+			s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS, a.Intent)
 			return b.String(), res, nil
 		}
 		fmt.Fprintf(&b, "%d. %s ✓ %s\n", i+1, st.Action, msg)
 		if extra.Text != "" {
-			// 读页面结构这类动作，结果本身就是模型下一步的依据，原样贴出来
+			// 读界面结构这类动作，结果本身就是模型下一步的依据，原样贴出来
 			b.WriteString(extra.Text)
 			b.WriteString("\n")
 		}
@@ -400,72 +625,72 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 			Index: i + 1, Action: st.Action, OK: true, Text: msg, Elements: extra.Elements, Value: extra.Value, Image: extra.Image,
 		})
 	}
-	fmt.Fprintf(&b, "全部 %d 步执行完成。", len(body))
+	fmt.Fprintf(&b, "全部 %d 步执行完成（%.1f 秒）。", len(body), time.Since(started).Seconds())
 	res.OK = true
-	s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
 	s.captureAfter(ctx, a.SessionID, last, &b, &res)
+	s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS, a.Intent)
 	return b.String(), res, nil
 }
 
-// captureAfter 执行收尾动作 wait_and_capture：等到条件成立，再把界面带回来。
-//
-// 等不到也照样把画面带回来——报告里能看到"这时候还没稳定"，比什么都不给强。
-func (s *Server) captureAfter(ctx context.Context, sid string, step batchStep, b *strings.Builder, res *actResult) {
-	insp, err := s.manager.Inspector(ctx, sid)
-	if err != nil {
-		return
+// batchTimeout 一批的总时限（配置项，必须小于 HTTP 中间件超时）。
+func (s *Server) batchTimeout() time.Duration {
+	if s.cfg != nil && s.cfg.BatchTimeout > 0 {
+		return s.cfg.BatchTimeout
 	}
-	cond := strings.TrimSpace(step.For)
-	timeout := time.Duration(step.TimeoutMS) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 3 * time.Second
+	return 2 * time.Minute
+}
+
+// stepDeadline 单个动作的最长等待；给了 timeoutMs 的动作（等条件/收尾抓帧）
+// 按它自己的时限放宽，别被看门狗提前砍掉。
+func (s *Server) stepDeadline(st batchStep) time.Duration {
+	base := 20 * time.Second
+	if s.cfg != nil && s.cfg.StepTimeout > 0 {
+		base = s.cfg.StepTimeout
 	}
-	started := time.Now()
-	settled := false
-	if cond != "" {
-		for {
-			raw, evalErr := insp.Evaluate(ctx, "Boolean("+cond+")")
-			if evalErr == nil && strings.TrimSpace(string(raw)) == "true" {
-				settled = true
-				break
-			}
-			if time.Since(started) >= timeout {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(100 * time.Millisecond):
-			}
+	if st.TimeoutMS > 0 {
+		if own := time.Duration(st.TimeoutMS)*time.Millisecond + 5*time.Second; own > base {
+			base = own
 		}
 	}
+	return base
+}
 
-	snap, err := insp.Snapshot(ctx)
+// captureAfter 执行收尾动作 capture：等到条件成立，再把界面带回来。
+//
+// 它和单独调 capture 是同一条实现：收尾那一眼同样进记录（同一件事不该有两种行为）。
+// 等不到也照样把画面带回来——记录里能看到"这时候还没稳定"，比什么都不给强。
+func (s *Server) captureAfter(ctx context.Context, sid string, step batchStep, b *strings.Builder, res *actResult) {
+	started := time.Now()
+	// 收尾不能用已经超时的 ctx：那时候正是最需要"最后一眼"的时候。
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	snap, _, shot, err := s.doCapture(capCtx, captureArgs{
+		SessionID: sid,
+		stepArgs:  stepArgs{Intent: step.Intent, Expect: step.Expect},
+		For:       step.For,
+		TimeoutMS: step.TimeoutMS,
+	})
 	if err != nil {
+		fmt.Fprintf(b, "\n收尾的 capture 没成功：%v", err)
 		return
 	}
 	res.Elements = snap.Elements
-	if previewer, ok := insp.(interface {
-		PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
-	}); ok {
-		if raw, err := previewer.PreviewJPEG(ctx, 70); err == nil {
-			res.After = raw
-		}
-	}
+	res.Shot = shot
+	waited := time.Since(started)
 	switch {
-	case cond == "":
-	case settled:
-		fmt.Fprintf(b, "\n界面已稳定（等了 %.1f 秒），画面见下。", time.Since(started).Seconds())
+	case strings.TrimSpace(step.For) == "":
+		fmt.Fprintf(b, "\n画面见下（capture 已记进记录）。")
 	default:
-		fmt.Fprintf(b, "\n没等到「%s」成立（等了 %.1f 秒），这是当时的画面。", cond, time.Since(started).Seconds())
+		fmt.Fprintf(b, "\n界面已稳定，画面见下（capture 已记进记录，本次抓帧耗时 %.1f 秒）。", waited.Seconds())
 	}
 }
 
-// markBatch 把这一批的起止补进刚写入的事件里。
+// markBatch 把这一批的起止和意图补进刚写入的事件里。
 //
 // 结束时间只有跑完才知道，所以先写事件、收尾时回填；失败只告警，
-// 最差是这条片段退回"前后各 2 秒"，不影响报告本身。
-func (s *Server) markBatch(ctx context.Context, sid string, beforeSeq int, startMS int64) {
+// 最差是这条片段退回"前后各 2 秒"，不影响记录本身。
+func (s *Server) markBatch(ctx context.Context, sid string, beforeSeq int, startMS int64, intent string) {
 	if startMS < 0 {
 		return
 	}
@@ -478,17 +703,17 @@ func (s *Server) markBatch(ctx context.Context, sid string, beforeSeq int, start
 		return
 	}
 	last := events[len(events)-1].Seq
-	if err := s.manager.SetBatchWindow(ctx, sid, beforeSeq+1, last, startMS, endMS); err != nil {
+	if err := s.manager.SetBatchMeta(ctx, sid, beforeSeq+1, last, startMS, endMS, intent); err != nil {
 		s.log.Warn("写入批次区间失败", "session", sid, "err", err)
 	}
 }
 
 func registerFeedbackTool(server *mcp.Server, s *Server) {
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "feedback",
+		Name: "amber_feedback",
 		Description: "用完这套工作流后，把「哪里别扭、缺什么、希望怎么改」写下来。" +
-			"这不是验收结论，也不会进报告——它只用于产品改进：被人看过之后统一变成改进项。" +
-			"用起来不顺、某个动作每次都要绕、报告哪里看不懂，都可以写。rating 可选（1~5）。",
+			"这不是结论，也不会进记录——它只用于产品改进：被人看过之后统一变成改进项。" +
+			"用起来不顺、某个动作每次都要绕、记录哪里看不懂，都可以写。rating 可选（1~5）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args feedbackArgs) (*mcp.CallToolResult, actionResult, error) {
 		id, err := s.doFeedback(ctx, args)
 		if err != nil {
@@ -500,9 +725,9 @@ func registerFeedbackTool(server *mcp.Server, s *Server) {
 
 // doFeedback 记一条对工作流本身的建议。
 //
-// 它不是验收证据，也不进报告：这是给产品改进用的输入。
+// 它不是验收证据，也不进记录：这是给产品改进用的输入。
 // 单独列出来，是为了让模型知道"觉得哪里别扭"是有地方说的，
-// 而不是在报告里写一句"这个工具不好用"就算完。
+// 而不是在记录里写一句"这个工具不好用"就算完。
 func (s *Server) doFeedback(ctx context.Context, a feedbackArgs) (int64, error) {
 	body := strings.TrimSpace(a.Text)
 	if body == "" {

@@ -46,6 +46,14 @@ type Config struct {
 	MaxUploadMB int
 	// SampleInterval 指标采样间隔。
 	SampleInterval time.Duration
+	// BatchTimeout 一次 run 调用（一串动作）的总时限。超过它就不再往下跑，
+	// 把已经完成的步骤和当时的画面按正常结果交回去。
+	// 必须小于 HTTP 中间件的超时：否则请求先被中间件砍断，客户端只能拿到一句
+	// 没有上下文的错误（服务端只剩一行 context canceled）。
+	BatchTimeout time.Duration
+	// StepTimeout 单个动作的最长等待。eval 这类「可能永远不返回」的动作靠它兜底，
+	// 免得一步拖死整批。
+	StepTimeout time.Duration
 	// LogLevel 日志级别。
 	LogLevel slog.Level
 }
@@ -82,6 +90,8 @@ func Load() (*Config, error) {
 		PayloadTTL:     envDuration("RIGD_PAYLOAD_TTL", 24*time.Hour),
 		MaxUploadMB:    envInt("RIGD_MAX_UPLOAD_MB", 2048),
 		SampleInterval: envDuration("RIGD_SAMPLE_INTERVAL", 5*time.Second),
+		BatchTimeout:   envDuration("RIGD_BATCH_TIMEOUT", 2*time.Minute),
+		StepTimeout:    envDuration("RIGD_STEP_TIMEOUT", 20*time.Second),
 		LogLevel:       envLogLevel("RIGD_LOG_LEVEL", slog.LevelInfo),
 		Display: DisplayConfig{
 			Width:  envInt("RIGD_DISPLAY_W", 1280),
@@ -108,6 +118,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.Record.FPS < 1 || cfg.Record.FPS > 60 {
 		return nil, fmt.Errorf("RIGD_RECORD_FPS 需在 1~60，收到 %d", cfg.Record.FPS)
+	}
+	if cfg.StepTimeout <= 0 || cfg.StepTimeout > cfg.BatchTimeout {
+		return nil, fmt.Errorf("RIGD_STEP_TIMEOUT 需在 0~%s 之间，收到 %s", cfg.BatchTimeout, cfg.StepTimeout)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建数据目录 %s 失败: %w", cfg.DataDir, err)

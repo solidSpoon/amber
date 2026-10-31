@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeftIcon, ExternalLinkIcon, PauseIcon, PlayIcon, Maximize2Icon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +12,7 @@ import { StatusBadge, VerdictBadge } from '@/components/session-badges';
 import { api, formatAgo, type LogSource, type Session, type SessionEvent } from '../api';
 
 /**
- * 会话详情 = 验收报告。
+ * 会话详情 = 这次会话留下的记录。
  *
  * 排版按「一篇文章」来：左边是这一步做了什么、为什么、结果，右边是这一步的画面的小循环播放，
  * 点一下才放大。刻意不用卡片框——一屏有十几个步骤时，边框会把阅读节奏切碎。
@@ -61,22 +61,6 @@ export default function SessionDetail({ id }: { id: string }) {
     );
   }
 
-  // 一段连续操作（一次 batch）只放一条片段，挂在这批第一条有画面的步骤上；
-  // 其余步骤只有文字。否则同一段画面会在十几行里各循环一遍。
-  const clipAnchor = new Map<number, number>();
-  {
-    let batch = Number.NaN;
-    let anchor = 0;
-    for (const e of events) {
-      if (e.batchStartMs !== batch) {
-        batch = e.batchStartMs;
-        anchor = 0;
-      }
-      if (!anchor && (e.clip || e.shot)) anchor = e.seq;
-      if (anchor) clipAnchor.set(e.seq, anchor);
-    }
-  }
-
   const failures = events.filter((e) => !e.ok);
   const lastOffset = events.reduce((max, e) => Math.max(max, e.videoOffsetMs), 0);
 
@@ -88,11 +72,12 @@ export default function SessionDetail({ id }: { id: string }) {
             <ArrowLeftIcon data-icon="inline-start" />
             会话列表
           </Button>
-          <h1 className="font-mono text-base">{session.id}</h1>
+          {/* 标题就是这次会话的意图；会话 ID 退到下面一行，读者不必靠它认人 */}
+          <h1 className="text-base font-medium">{session.title || session.app}</h1>
           <StatusBadge status={session.status} />
           <VerdictBadge verdict={session.verdict} />
           <Badge variant="outline">{session.app}</Badge>
-          <span className="font-mono text-xs text-muted-foreground">{session.ref || '—'}</span>
+          <span className="font-mono text-xs text-muted-foreground">{session.ref || session.id}</span>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>{formatAgo(session.createdAt)}</span>
@@ -162,28 +147,51 @@ export default function SessionDetail({ id }: { id: string }) {
   );
 }
 
+/** 画面外框：点开看大图的那层壳，所有画面都走它，样式只写一份 */
+function MediaTile({
+  label,
+  onZoom,
+  children,
+}: {
+  label?: string;
+  onZoom: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <figure className="flex flex-col gap-1">
+      <button
+        onClick={onZoom}
+        className="group relative block w-full cursor-zoom-in overflow-hidden rounded-md bg-neutral-950 ring-1 ring-black/10 transition hover:ring-2 hover:ring-foreground/20"
+        title="点开看大图"
+        aria-label={label ? `${label} 的画面` : '画面'}
+      >
+        {children}
+        <span className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100">
+          <Maximize2Icon className="size-4 text-white drop-shadow" />
+        </span>
+      </button>
+      {label && (
+        <figcaption className="truncate text-[11px] leading-snug text-muted-foreground/80">{label}</figcaption>
+      )}
+    </figure>
+  );
+}
+
 /**
- * 一步：左边文字，右边画面的小循环播放。
- *
- * 片段自动播（像动图），滑出视口就暂停——一页几十步全在解码没必要。
- * 想看清楚再点它，切成大图。
+ * 录像片段：自动循环播放（像动图），滑出视口就暂停——一页几十步全在解码没必要。
+ * 它是"这四秒的过程"，不是某一步的结果。
  */
-/** 小窗播放：进入视口就播，离开就停；点开看大图 */
-function StepMedia({
+function ClipPlayer({
   sessionId,
   event,
   display,
-  isClipAnchor,
   onZoom,
 }: {
   sessionId: string;
   event: SessionEvent;
   display?: Session['display'];
-  isClipAnchor: boolean;
   onZoom: () => void;
 }) {
-  // 同一批共用一条片段，只有这批的第一行放视频
-  const showClip = Boolean(event.clip) && isClipAnchor;
   const ref = useRef<HTMLVideoElement>(null);
   const [inView, setInView] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -203,55 +211,63 @@ function StepMedia({
     else el.pause();
   }, [inView]);
 
-  if (!showClip && !event.shot) return <div className="hidden sm:block" />;
-
   return (
-    <button
-      onClick={onZoom}
-      className="group relative block w-full self-start overflow-hidden rounded-md bg-neutral-950 ring-1 ring-black/10 transition hover:ring-2 hover:ring-foreground/20"
-      title="点开看大图"
-      aria-label={`${event.caption} 的画面`}
-    >
-      {showClip ? (
-        <ScreenStage display={display} className="rounded-none border-0">
-          <video
-            // key 带上 seq：不然 React 会复用同一个 video 元素，
-            // 切换批次时还放着上一段的画面
-            key={`clip-${event.seq}`}
-            ref={ref}
-            src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
-            muted
-            loop
-            playsInline
-            preload="metadata"
-            className="size-full"
-            onTimeUpdate={(e) => {
-              const video = e.currentTarget;
-              setProgress(video.duration ? video.currentTime / video.duration : 0);
-            }}
-          />
-        </ScreenStage>
-      ) : (
-        <img
-          src={`/api/sessions/${sessionId}/artifacts/${event.shot}`}
-          alt={event.caption}
-          loading="lazy"
-          className="block aspect-video w-full object-cover"
+    <MediaTile label="过程录像" onZoom={onZoom}>
+      <ScreenStage display={display} className="rounded-none border-0">
+        <video
+          // key 带上 seq：不然 React 会复用同一个 video 元素，切换批次时还放着上一段的画面
+          key={`clip-${event.seq}`}
+          ref={ref}
+          src={`/api/sessions/${sessionId}/events/${event.seq}/clip`}
+          muted
+          loop
+          playsInline
+          preload="metadata"
+          className="size-full"
+          onTimeUpdate={(e) => {
+            const video = e.currentTarget;
+            setProgress(video.duration ? video.currentTime / video.duration : 0);
+          }}
         />
-      )}
-      {showClip && (
-        // 进度条跟着片段循环走：一眼看出片段放到了哪，不用等它播完
-        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-[3px] bg-black/40">
-          <span
-            className="block h-full bg-white shadow-[0_0_2px_rgba(0,0,0,0.6)] transition-[width] duration-150 ease-linear"
-            style={{ width: `${Math.min(100, progress * 100)}%` }}
-          />
-        </span>
-      )}
-      <span className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100">
-        <Maximize2Icon className="size-4 text-white drop-shadow" />
+      </ScreenStage>
+      {/* 进度条跟着片段循环走：一眼看出片段放到了哪，不用等它播完 */}
+      <span className="pointer-events-none absolute inset-x-0 bottom-0 h-[3px] bg-black/40">
+        <span
+          className="block h-full bg-white shadow-[0_0_2px_rgba(0,0,0,0.6)] transition-[width] duration-150 ease-linear"
+          style={{ width: `${Math.min(100, progress * 100)}%` }}
+        />
       </span>
-    </button>
+    </MediaTile>
+  );
+}
+
+/**
+ * 一张截图：capture 交回去的那一帧，或者失败那一步的现场。
+ *
+ * 交付物本身就是整屏图（含原生对话框），所以按原样显示、不裁剪——
+ * 读者要看的正是"当时屏幕长什么样"。
+ */
+function ShotTile({
+  sessionId,
+  event,
+  onZoom,
+}: {
+  sessionId: string;
+  event: SessionEvent;
+  onZoom: () => void;
+}) {
+  if (!event.shot) return null;
+  // capture 的截图就是这一段的结论帧，读者不必再猜"这张是过程还是结果"
+  const label = event.tool === 'capture' ? '这一步的画面' : event.caption;
+  return (
+    <MediaTile label={label} onZoom={onZoom}>
+      <img
+        src={`/api/sessions/${sessionId}/artifacts/${event.shot}`}
+        alt={event.caption}
+        loading="lazy"
+        className="block w-full"
+      />
+    </MediaTile>
   );
 }
 
@@ -308,7 +324,7 @@ function Lightbox({
   );
 }
 
-/** 完整录像：报告里是附录，不是主入口 */
+/** 完整录像：记录里是附录，不是主入口 */
 function VideoAppendix({ session }: { session: Session }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -462,11 +478,14 @@ function LogPanel({ sessionId }: { sessionId: string }) {
 
 
 /**
- * 一批 = 报告里的一个步骤。
+ * 一批 = 记录里的一段。
  *
- * 一批只对应一条录像，所以读者关心的是"这一批做了什么、结果如何"，
- * 不是批内的每一下点击。批头一句话，批内明细压成细行，画面放在末尾——
- * 看完文字正好看到结果。
+ * 版式：左边是「这一批做了什么」，右边是「当时的样子」。
+ * 桌面左右两栏——一屏能同时读到文字和画面，眼睛不用来回上下跳；
+ * 窄屏自动堆成一栏，画面落在这段文字下面。
+ *
+ * 右边不止放录像片段：capture 返回的那张整屏截图也在这里。
+ * 片段是「这四秒的过程」，截图是「run 交回去的那一帧」，两者不是一回事。
  */
 function BatchRow({
   index,
@@ -482,55 +501,75 @@ function BatchRow({
   onZoom: (event: SessionEvent) => void;
 }) {
   const failed = group.events.filter((e) => !e.ok);
-  const withClip = group.events.find((e) => e.clip);
+  // 一批只放一条录像片段：批内相邻两步可能只隔 0.2 秒，逐行放就成了同一段画面循环十几遍。
+  const clipEvent = group.events.find((e) => e.clip);
+  // 截图逐张列出来（capture 的、失败步骤的），它们各自是独立的一帧证据。
+  const shots = group.events.filter((e) => e.shot);
   const end = Math.max(0, group.events[group.events.length - 1].videoOffsetMs);
 
   return (
-    <li className="flex flex-col gap-2 py-4">
-      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
-        <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-          {String(index).padStart(2, '0')}
-        </span>
-        <span className={`text-sm font-medium ${failed.length ? 'text-destructive' : ''}`}>
-          {summarizeBatch(group.events)}
-        </span>
-        <span className="ml-auto font-mono text-[11px] text-muted-foreground tabular-nums">
-          {formatClock(Math.max(0, group.start) / 1000)}
-          {end > group.start + 500 && `–${formatClock(end / 1000)}`}
-        </span>
+    <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,26rem)] sm:gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,30rem)]">
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+          <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+            {String(index).padStart(2, '0')}
+          </span>
+          {/* 这一段的标题：调用方给的意图；没给就退回按动作拼（绝不编） */}
+          <span className={`text-sm font-medium ${failed.length ? 'text-destructive' : ''}`}>
+            {group.events[0].batchIntent || summarizeBatch(group.events)}
+          </span>
+          <span className="ml-auto font-mono text-[11px] text-muted-foreground tabular-nums">
+            {formatClock(Math.max(0, group.start) / 1000)}
+            {end > group.start + 500 && `–${formatClock(end / 1000)}`}
+          </span>
+        </div>
+
+        {/* 批内明细：一行一步，只写做什么和结果，不铺开意图/期望 */}
+        <ul className="flex flex-col gap-0.5 pl-6 text-[11px] text-muted-foreground/80">
+          {group.events.filter((e) => !isSleepStep(e)).map((event) => (
+            <li key={event.seq} className="flex items-baseline gap-2">
+              <span className="text-muted-foreground/50">·</span>
+              <span className={event.ok ? '' : 'text-destructive'}>{event.caption}</span>
+              {resultHead(event.result) && (
+                <span className="truncate text-muted-foreground/60">{resultHead(event.result)}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        {/* 截图贴在文字下面：先读完"做了什么"，紧跟着就是"当时交回去的那一帧"。
+            比右栏的录像略小一圈——它是证据，不是主画面。 */}
+        {shots.length > 0 && (
+          <div className="flex flex-col gap-2 pl-6 sm:max-w-[22rem]">
+            {shots.map((event) => (
+              <ShotTile
+                key={event.seq}
+                sessionId={sessionId}
+                event={event}
+                onZoom={() => onZoom(event)}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* 批内明细：一行一步，只写做什么和结果，不铺开意图/期望 */}
-      <ul className="flex flex-col gap-0.5 pl-6 text-[11px] text-muted-foreground/80">
-        {group.events.filter((e) => !isSleepStep(e)).map((event) => (
-          <li key={event.seq} className="flex items-baseline gap-2">
-            <span className="text-muted-foreground/50">·</span>
-            <span className={event.ok ? '' : 'text-destructive'}>{event.caption}</span>
-            {resultHead(event.result) && (
-              <span className="truncate text-muted-foreground/60">{resultHead(event.result)}</span>
-            )}
-          </li>
-        ))}
-      </ul>
-
-      {withClip && (
-        <div className="pl-6">
-          <StepMedia
+      <div className="flex min-w-0 flex-col gap-2 sm:self-start">
+        {clipEvent && (
+          <ClipPlayer
             sessionId={sessionId}
-            event={withClip}
+            event={clipEvent}
             display={display}
-            isClipAnchor
-            onZoom={() => onZoom(withClip)}
+            onZoom={() => onZoom(clipEvent)}
           />
-        </div>
-      )}
+        )}
+      </div>
     </li>
   );
 }
 
-/** 睡眠用的 eval 是实现细节，不该出现在报告里 */
+/** 纯等待不产生新画面，记录里并进相邻的动作，不单独占一行 */
 function isSleepStep(e: SessionEvent): boolean {
-  return e.tool === 'eval' && /new Promise\([^)]*setTimeout/.test(JSON.stringify(e.args ?? ''));
+  return e.tool === 'sleep' || (e.tool === 'eval' && /new Promise\([^)]*setTimeout/.test(JSON.stringify(e.args ?? '')));
 }
 
 /** 一批的标题：用批里的动作名拼一句话，读者先看这句就够 */
@@ -541,7 +580,7 @@ function summarizeBatch(events: SessionEvent[]): string {
   return names.length > 3 ? `${head} 等 ${names.length} 个动作` : head;
 }
 
-/** 按「一段连续操作」分组：报告里同批的步骤归在一起，一批只有一条片段 */
+/** 按「一段连续操作」分组：记录里同批的动作归在一起，一批只有一条片段 */
 function batchGroups(events: SessionEvent[]): { start: number; events: SessionEvent[] }[] {
   const groups: { start: number; events: SessionEvent[] }[] = [];
   for (const e of events) {

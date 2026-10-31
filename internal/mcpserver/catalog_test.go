@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 
 	cfg := &config.Config{DataDir: t.TempDir(), Image: "x", MaxSessions: 1, CDPPortBase: 39222, VNCPortBase: 36080}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(session.NewManager(cfg, st, noopDocker{}, nil, log), st, log)
+	server := NewServer(session.NewManager(cfg, st, noopDocker{}, nil, log), st, cfg, log)
 
 	tools, err := Catalog(ctx, server)
 	if err != nil {
@@ -57,7 +58,7 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 	// 工具面就这些：开、跑、看一眼、收、对工作流本身的反馈。
 	// 具体动作（点击、悬停、等待…）都走 run 的 steps，不再各占一个工具。
 	want := []string{
-		"end_session", "feedback", "list_sessions", "run", "snapshot", "start_session",
+		"amber_capture", "amber_feedback", "amber_list", "amber_run", "amber_start", "amber_stop",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("工具数量 = %d，期望 %d：%v", len(got), len(want), got)
@@ -71,8 +72,13 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 
 	// 会话类工具必须标出必填参数，页面上的调用示例依赖它
 	for _, tool := range tools {
-		if tool.Name == "start_session" && len(tool.Required) == 0 {
-			t.Fatal("start_session 应至少有一个必填参数（app）")
+		if tool.Name == "amber_start" {
+			if !slices.Contains(tool.Required, "payload") || !slices.Contains(tool.Required, "title") {
+				t.Fatalf("amber_start 的必填参数应包含 payload 与 title，实际 %v", tool.Required)
+			}
+		}
+		if tool.Name == "amber_run" && !slices.Contains(tool.Required, "intent") {
+			t.Fatalf("amber_run 的必填参数应包含 intent（记录里那一段的标题），实际 %v", tool.Required)
 		}
 	}
 }

@@ -4,7 +4,7 @@ BIN := bin/rigd
 PKG := ./...
 GOFLAGS := -trimpath
 
-.PHONY: help dev build web test lint tidy clean run mcp
+.PHONY: help dev build web test lint tidy clean run mcp icons
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-8s\033[0m %s\n", $$1, $$2}'
@@ -36,3 +36,6 @@ mcp: build ## 以 MCP stdio 模式运行（给外部 AI 客户端用）
 
 clean:
 	rm -rf bin web/dist
+
+icons: ## 重新生成品牌图标（SVG + 1024 位图，源码见 cmd/ambericon）
+	go run ./cmd/ambericon

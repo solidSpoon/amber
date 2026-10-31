@@ -65,9 +65,11 @@ type Rect struct {
 // Known 判断几何是否有效。
 func (r Rect) Known() bool { return r.Width > 0 && r.Height > 0 }
 
-// Session 一次验收会话（= 一台一次性测试机）。
+// Session 一次会话（= 一台一次性机器）。
 type Session struct {
-	ID        string
+	ID string
+	// Title 这次验收的意图（一句话，调用方给）：会话列表和记录顶部先展示它。
+	Title     string
 	App       string
 	Ref       string
 	CommitSHA string
@@ -83,7 +85,7 @@ type Session struct {
 	Payload string
 	// Assets 素材槽位 → 来源（JSON），槽位由产物的 rig.json 声明
 	Assets string
-	// Recipe 产物自述（rig.json 的原文快照），报告里能看出当时怎么启动的
+	// Recipe 产物自述（rig.json 的原文快照），记录里能看出当时怎么启动的
 	Recipe string
 	// Frame 录像里真正有内容的那块区域（= 应用窗口），零值表示未知。
 	// Display 它所在的虚拟屏；两者不同就说明录进去的桌面比窗口大。
@@ -109,7 +111,7 @@ type Event struct {
 	Tool      string
 	Args      json.RawMessage
 	OK        bool
-	// Kind 这一步的性质：action（做了件事）/ assert（断言）/ note（只写说明）。
+	// Kind 这一步的性质：action（做了件事）/ note（只写说明，比如窗口尺寸变化）。
 	Kind string
 	// Caption 动作的人话描述，从可访问性树自动生成（点击「保存」按钮）。
 	Caption string
@@ -120,7 +122,7 @@ type Event struct {
 	VideoOffsetMS int64
 	Result        string
 	ArtifactPath  string
-	// Shot 这一步的画面（相对会话目录）；失败也截，报告里最有用的就是失败那张。
+	// Shot 这一步的画面（相对会话目录）；失败也截，记录里最有用的就是失败那张。
 	Shot string
 	// Frame 写这条记录时窗口的矩形。窗口会在会话中途变，裁剪必须按"当时"的几何来。
 	Frame Rect
@@ -128,9 +130,11 @@ type Event struct {
 	// 切片按这段来：一批一条录像，而不是每步一条。
 	BatchStartMS int64
 	BatchEndMS   int64
+	// BatchIntent 这一段操作为什么做（调用方给 run 的那句话）；记录里当这一段的小标题。
+	BatchIntent string
 }
 
-// Artifact 会话产物（截图/录像/报告）。
+// Artifact 会话产物（截图/录像/记录）。
 type Artifact struct {
 	ID        int64
 	SessionID string
@@ -285,12 +289,12 @@ func parseTime(v sql.NullString) time.Time {
 // CreateSession 写入一条新会话。
 func (s *Store) CreateSession(ctx context.Context, sess Session) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions
-		(id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+		(id, title, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
 		 payload, assets, recipe,
 		 frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 		 created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sess.ID, sess.App, sess.Ref, sess.CommitSHA, sess.Image, sess.Container, string(sess.Status),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.ID, sess.Title, sess.App, sess.Ref, sess.CommitSHA, sess.Image, sess.Container, string(sess.Status),
 		sess.CDPPort, sess.VNCPort, sess.Slot, sess.Dir,
 		sess.Payload, sess.Assets, sess.Recipe,
 		sess.Frame.X, sess.Frame.Y, sess.Frame.Width, sess.Frame.Height, sess.Display.Width, sess.Display.Height,
@@ -329,7 +333,7 @@ func (s *Store) UpdateSession(ctx context.Context, sess Session) error {
 // ErrNotFound 表示目标记录不存在。
 var ErrNotFound = errors.New("记录不存在")
 
-const sessionColumns = `id, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
+const sessionColumns = `id, title, app, ref, commit_sha, image, container, status, cdp_port, vnc_port, slot, dir,
 	payload, assets, recipe,
 	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 	created_at, started_at, ended_at, idle_deadline, video_path, video_duration_ms, verdict, summary, error`
@@ -341,7 +345,7 @@ func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 		createdAt                        string
 		startedAt, endedAt, idleDeadline sql.NullString
 	)
-	err := sc.Scan(&sess.ID, &sess.App, &sess.Ref, &sess.CommitSHA, &sess.Image, &sess.Container, &status,
+	err := sc.Scan(&sess.ID, &sess.Title, &sess.App, &sess.Ref, &sess.CommitSHA, &sess.Image, &sess.Container, &status,
 		&sess.CDPPort, &sess.VNCPort, &sess.Slot, &sess.Dir,
 		&sess.Payload, &sess.Assets, &sess.Recipe,
 		&sess.Frame.X, &sess.Frame.Y, &sess.Frame.Width, &sess.Frame.Height,
@@ -427,13 +431,13 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events
 		(session_id, seq, at, tool, args, ok, kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot,
-		 frame_x, frame_y, frame_w, frame_h, batch_start_ms, batch_end_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 frame_x, frame_y, frame_w, frame_h, batch_start_ms, batch_end_ms, batch_intent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, seq, e.At.UTC().Format(time.RFC3339Nano), e.Tool, args, ok,
 		e.Kind, e.Caption, e.Intent, e.Expect,
 		e.DurationMS, e.VideoOffsetMS, e.Result, e.ArtifactPath, e.Shot,
 		e.Frame.X, e.Frame.Y, e.Frame.Width, e.Frame.Height,
-		orDefault(e.BatchStartMS), orDefault(e.BatchEndMS)); err != nil {
+		orDefault(e.BatchStartMS), orDefault(e.BatchEndMS), e.BatchIntent); err != nil {
 		return 0, fmt.Errorf("写入事件失败: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -442,13 +446,14 @@ func (s *Store) AppendEvent(ctx context.Context, e Event) (int, error) {
 	return seq, nil
 }
 
-// SetBatchWindow 给一段连续操作（一次 run 调用）补上起止位置。
+// SetBatchMeta 给一段连续操作（一次 run 调用）补上起止位置和意图。
 //
 // 批次是切片的单位：一批一条录像，从第一步前 2 秒到最后一步后 2 秒。
-// 起止要等这一批跑完才知道，所以先写事件、结束后再补。
-func (s *Store) SetBatchWindow(ctx context.Context, sessionID string, fromSeq, toSeq int, startMS, endMS int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE events SET batch_start_ms = ?, batch_end_ms = ?
-		WHERE session_id = ? AND seq BETWEEN ? AND ?`, startMS, endMS, sessionID, fromSeq, toSeq)
+// 起止要等这一批跑完才知道，所以先写事件、结束后再补；意图跟着一起补，
+// 因为一条批次的意图只该写一次，不该在每一步里各存一份。
+func (s *Store) SetBatchMeta(ctx context.Context, sessionID string, fromSeq, toSeq int, startMS, endMS int64, intent string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE events SET batch_start_ms = ?, batch_end_ms = ?, batch_intent = ?
+		WHERE session_id = ? AND seq BETWEEN ? AND ?`, startMS, endMS, intent, sessionID, fromSeq, toSeq)
 	if err != nil {
 		return fmt.Errorf("写入批次区间失败: %w", err)
 	}
@@ -463,7 +468,7 @@ func orDefault(v int64) int64 {
 func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, seq, at, tool, args, ok,
 		kind, caption, intent, expect, duration_ms, video_offset_ms, result, artifact_path, shot,
-		frame_x, frame_y, frame_w, frame_h, batch_start_ms, batch_end_ms
+		frame_x, frame_y, frame_w, frame_h, batch_start_ms, batch_end_ms, batch_intent
 		FROM events WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("查询事件失败: %w", err)
@@ -482,7 +487,7 @@ func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, erro
 			&e.Kind, &e.Caption, &e.Intent, &e.Expect,
 			&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath, &e.Shot,
 			&e.Frame.X, &e.Frame.Y, &e.Frame.Width, &e.Frame.Height,
-			&e.BatchStartMS, &e.BatchEndMS); err != nil {
+			&e.BatchStartMS, &e.BatchEndMS, &e.BatchIntent); err != nil {
 			return nil, fmt.Errorf("扫描事件失败: %w", err)
 		}
 		e.Args = json.RawMessage(args)

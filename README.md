@@ -1,6 +1,6 @@
 # 项目概览
 
-`rigd` 是验收流水线的控制面：一台常驻的 Go 服务 + 一个 React 管理台。
+`rigd`（产品名 **Amber**，代码与二进制沿用这个内部代号）是验收流水线的控制面：一台常驻的 Go 服务 + 一个 React 管理台。
 它把「一次性容器 = 一台可扔的测试电脑」这件事做成可调度、可审计、可回看的会话。
 
 ## 为什么要从 v0 重构
@@ -26,7 +26,7 @@ v0（`electron-acceptance-rig`）把 agent 塞进了容器，能用，但代价�
                       │ MCP (stdio, JSON-RPC)
 ┌─────────────────────▼─────────────────────────────┐
 │ rigd (Go, 单进程)                                  │
-│  ├─ mcp        工具面：start/snapshot/click/…      │
+│  ├─ mcpserver  工具面：start/run/capture/…        │
 │  ├─ scheduler  会话注册表：容器、端口、超时回收      │
 │  ├─ inspect    通过 CDP 读结构 / 点 / 输 / 截图     │
 │  ├─ store      SQLite：会话、事件、产物、指标采样    │
@@ -70,24 +70,26 @@ v0（`electron-acceptance-rig`）把 agent 塞进了容器，能用，但代价�
 
 控制面需要 `ffmpeg` 在 PATH 上：用来抽首帧封面，以及按需切「这一步前后 4 秒」的短片。
 
-## 报告（产物形态）
+## 记录（产物形态）
 
-验收产物不是一条长录像，而是一份可以顺着读的**步骤报告**。录像降级成证据索引：
+验收产物不是一条长录像，而是一份可以顺着读的**步骤记录**。录像降级成证据索引：
 每一步旁边一个 ▶，点开只看那 4 秒，不用在时间里搜。
 
 ```
 每次工具调用 → Record() 闸门 → 一条事件（caption/intent/expect/result/shot/结论）+ 一步截图
                                    ↓
-报告页：步骤流 + 断言 ✅/❌ + 空窗标记（"模型在思考 18s"）
+记录页：步骤流 + 每步画面 + 空窗标记（"模型在思考 18s"）
 附录：完整录像 + 日志
 ```
 
 几条硬规则：
 
-- **报告只能从 `Record()` 流出来**。不允许事后另写一份：两条链路一定会对不上，而对不上的报告比没有更能骗人。
+- **记录只能从 `Record()` 流出来**。不允许事后另写一份：两条链路一定会对不上，而对不上的记录比没有更能骗人。
 - **caption 自动生成**，从可访问性树拿 `role`/`name`（`点击「保存」按钮`）。模型只负责 `intent`（为什么）、`expect`（期望什么），没写就空缺，不编。
 - **每步自动截图**，点元素的那一步会把元素框高亮出来（Steps Recorder 那个红圈），失败也截——读者最想看的就是出错时的屏幕。截图宽度 960、JPEG q85，一步 ~45KB。
-- **断言是一等步骤**（`assert`），不是结论文本：`{claim, ok, evidence}` 分开存，报告里才能把「你判断的」和「客观证据」摆在一起。
+- **画面截的是整块屏幕，不是网页**。原生文件对话框、系统菜单不在页面里，
+  用 CDP 的 `Page.captureScreenshot` 拍不到它们——而那正是最需要看的现场。
+  所以步骤图由 `session/screen.go` 在容器里对虚拟屏抓帧（和录屏同一块屏）。
 - **空窗不删，标出来**：两步之间超过 15s 就是一行 `模型在思考 18s`，录像里那段照旧保留。
 - 短片刻意用**固定 ±2 秒**，不做动画检测：可预期、不出怪，够用。
 
@@ -101,10 +103,10 @@ internal/
   dockerx/          容器运行时抽象（当前实现走 docker CLI）
   session/          会话调度：起容器、分配端口、超时回收、收尾
   cdp/              裸 CDP 客户端（websocket + JSON-RPC）
-  inspect/          在 cdp 之上：结构快照、点击、输入、截图
+  inspect/          在 cdp 之上：结构快照、点击、输入、框选元素
   telemetry/        宿主与容器指标采样
   httpapi/          REST + SSE + 内嵌前端
-  mcp/              MCP 工具面
+  mcpserver/        MCP 工具面
 web/                React 管理台（Vite + TS + Tailwind + shadcn/ui）
 deploy/             Dockerfile、systemd unit
 ```
@@ -131,6 +133,44 @@ make build        # 产出 bin/rigd（含前端）
 - 画面一律走 `ScreenStage`（`web/src/components/screen-stage.tsx`），别直接铺 `<video>`/`<img>`：
   它负责按 session 的 `frame`/`display` 裁剪、等比、黑底，换成别的写法就会退回
   「白底一张大图、应用缩在角落」那种样子。
+
+## MCP 工具面
+
+六个工具，一个动词只做一件事（真正的契约在 `internal/mcpserver` 的
+`actionTable` 与 `runInputSchema`，这里只解释怎么读它）：
+
+| 工具 | 干什么 |
+| --- | --- |
+| `amber_start` | 起一台一次性机器：容器 + 应用 + 全程录屏（`title` 必填，一句话说明这次验收的意图） |
+| `run` | 执行一串动作（1~50 步），最后一步必须是 `capture`（`intent` 必填，记录里当这一段的小标题） |
+| `capture` | 看一眼当前界面，并记成记录里的一步（返回元素表 + 整屏画面） |
+| `amber_stop` | 收尾：停录屏、归档、销毁容器，给结论 |
+| `amber_list` | 看最近会话与状态 |
+| `feedback` | 对工作流本身提意见（不进记录） |
+
+`run` 的每一步只有 `action` 是必填，其余按动作来：
+
+| 动作 | 必填 | 说明 |
+| --- | --- | --- |
+| `click` / `hover` | `ref` 或 `match` 或 `selector` 或 `x`+`y` | 点 / 悬停 |
+| `fill` | `ref`/`match`/`selector` + `text` | 覆盖填写 |
+| `press` | `key` | 真实键盘，页面与原生对话框都收得到 |
+| `type` | `text` | 往当前焦点打字 |
+| `eval` | `script` | 页面里求值，返回值原样给你 |
+| `wait` | `for`（+`timeoutMs`） | 等条件成立，等不到算这一步失败 |
+| `sleep` | `ms` | 等固定时长，不会失败 |
+| `capture` | 可选 `for` + `timeoutMs` | 必须是最后一步 |
+
+**意图是必填的**：`amber_start.title` 是这次验收的标题（会话列表和记录顶部展示它），
+`run.intent` 是这一段操作的标题。原来记录里的小标题是从动作名拼出来的
+（「点击「Next」→ 点击「Skip」」），那是"做了什么"，不是"为什么"——拼不出来的就不编。
+
+两条纪律：
+
+- **`wait` 只等条件、`sleep` 只等时间**，写混了当场报错并告诉该用哪个。
+  以前"等 3 秒"只能写 `wait(for:"true")`，那是等 0 秒——语义正好反了。
+- **`capture` 是唯一的"看一眼"**。历史上 `snapshot` / `wait_and_capture` 是同一个东西的
+  两个名字，现在只宣传 `capture`；旧名字还能用，但不再出现在工具清单里。
 
 ## 约定
 

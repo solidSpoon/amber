@@ -1,15 +1,15 @@
 package session
 
-// step.go：「报告的一步」——把一次工具调用变成人能读的东西。
+// step.go：「记录的一步」——把一次工具调用变成人能读的东西。
 //
-// 设计上刻意不引入第二个写入链路：报告就是从 Record() 这道闸门流出来的。
-// 如果让模型事后另写一份报告，两边一定会对不上，而对不上的报告比没有更能骗人。
+// 设计上刻意不引入第二个写入链路：记录就是从 Record() 这道闸门流出来的。
+// 如果让模型事后另写一份记录，两边一定会对不上，而对不上的记录比没有更能骗人。
 //
 // 每步四样东西：
 //   caption 做了什么（自动生成，不靠模型自觉）
 //   intent  为什么做（调用方给，可空）
 //   expect  期望看到什么（调用方给，可空）
-//   shot    画面（自动截，失败也截——报告里最有用的正是失败那张）
+//   shot    画面（自动截，失败也截——记录里最有用的正是失败那张）
 
 import (
 	"context"
@@ -24,13 +24,13 @@ import (
 	"github.com/solidSpoon/rigd/internal/store"
 )
 
-// Step 一次工具调用的报告元信息。
+// Step 一次工具调用的记录元信息。
 type Step struct {
-	// Tool 工具名（click/fill/press/eval/snapshot/screenshot/assert）。
+	// Tool 工具名（click/fill/press/eval/capture/screenshot/window）。
 	Tool string
 	// Args 原始参数，照旧进审计。
 	Args any
-	// Kind 步骤性质：action（默认）/ assert / note。
+	// Kind 步骤性质：action（默认）/ note。
 	Kind string
 	// Intent 为什么做这一步，Expect 期望看到什么；都由调用方给，可空。
 	Intent string
@@ -41,8 +41,8 @@ type Step struct {
 	Caption string
 	// Shot 这一步的截图（相对会话目录），由 Record 自动填。
 	Shot string
-	// Passed 非空时覆盖成败判定（断言用：断言不成立 ≠ 工具调用失败）。
-	Passed *bool
+	// AlwaysShot 这一步成功也要配图（capture 这种「这一步的价值就是那张图」的动作）。
+	AlwaysShot bool
 }
 
 // describeElement 是 checkDescriptions 用到的能力（测试里的假检查器不实现）。
@@ -50,9 +50,10 @@ type describeElement interface {
 	Describe(ref string) (inspect.Element, bool)
 }
 
-// stepShooter 能截「带高亮」的步骤图的检查器（测试里的假检查器不实现）。
-type stepShooter interface {
-	StepJPEG(ctx context.Context, path, ref string) (int64, error)
+// elementHighlighter 能在页面上框出某个元素（整屏抓帧之前先画框）。
+type elementHighlighter interface {
+	Highlight(ctx context.Context, ref string) error
+	ClearHighlight(ctx context.Context) error
 }
 
 // describe 把参数里的元素引用变成「角色 + 名字」，用于自动生成 caption。
@@ -70,7 +71,7 @@ func describe(insp Inspector, step Step) *inspect.Element {
 // captionFor 生成「点击「保存」按钮」这种句子。
 //
 // 原则：能确定就写具体（元素名 + 角色），不能确定就老实写参数，
-// 绝不编。报告里出现一句编的话，整份报告的可信度就没了。
+// 绝不编。记录里出现一句编的话，整份记录的可信度就没了。
 func captionFor(step Step, el *inspect.Element) string {
 	args := flattenArgs(step.Args)
 	name := ""
@@ -108,6 +109,17 @@ func captionFor(step Step, el *inspect.Element) string {
 			return fmt.Sprintf("点击 (%s, %s)", x, y)
 		}
 		return "点击页面"
+	case "hover":
+		if target != "" {
+			return "把鼠标移到" + target + "上"
+		}
+		if ref != "" {
+			return byRef("移入")
+		}
+		if x, y, ok := args.coord(); ok {
+			return fmt.Sprintf("移入坐标 (%s, %s)", x, y)
+		}
+		return "移入元素"
 	case "fill":
 		text := truncateString(args.str("text"), 60)
 		if target != "" {
@@ -121,14 +133,15 @@ func captionFor(step Step, el *inspect.Element) string {
 		return "按下 " + strings.TrimSpace(fmt.Sprint(args["key"]))
 	case "eval":
 		return "执行脚本 " + quote(truncateString(args.str("script"), 70))
-	case "snapshot":
-		return "读取页面结构"
+	case "snapshot", "capture":
+		return "看一眼当前界面"
 	case "wait":
 		return "等待界面就绪"
+	case "sleep":
+		// ms 是数字不是字符串，用 fmt 兜住；写成"暂停  毫秒"读者会以为丢了一个字
+		return "暂停 " + strings.TrimSpace(fmt.Sprint(args["ms"])) + " 毫秒"
 	case "screenshot":
 		return "截图留证"
-	case "assert":
-		return truncateString(args.str("claim"), 120)
 	}
 	return step.Tool
 }
@@ -209,13 +222,15 @@ func truncateString(s string, limit int) string {
 	return string([]rune(s)[:limit]) + "…"
 }
 
-// HasVisual 这一步值不值得配一张画面。
+// HasVisual 这一步值不值得配一段录像片段。
 //
-// snapshot 要留图：它就是"看一眼当前界面"，报告里那一眼本身就是证据。
-// eval / wait 只取值、只等条件，拍下来和上一步一样，白占地方。
+// capture 要：它就是"看一眼当前界面"，那一眼本身就是证据。
+// eval / wait / sleep 只取值、等条件、等时间，片段和上一步一样，白占地方。
+//
+// 注意它只管"要不要留录像片段"，不管失败截图：失败的那一步永远要截一张。
 func HasVisual(tool string) bool {
 	switch tool {
-	case "eval", "wait":
+	case "eval", "wait", "sleep":
 		return false
 	default:
 		return true
@@ -224,19 +239,21 @@ func HasVisual(tool string) bool {
 
 // captureShot 截这一步的画面，返回相对会话目录的路径。
 //
-// 失败也要截：报告里读者最想看的就是「出错时屏幕长什么样」。
+// 失败也要截：记录里读者最想看的就是「出错时屏幕长什么样」。
 // 截不到不算错误（CDP 断了、应用崩了都可能导致），只是这一步没有图。
-func (m *Manager) captureShot(ctx context.Context, sessDir string, insp Inspector, step Step) string {
-	if !HasVisual(step.Tool) {
-		return ""
+func (m *Manager) captureShot(ctx context.Context, id, sessDir string, insp Inspector, step Step) string {
+	// 要先高亮再抓帧：高亮是页面里的覆盖层，整屏抓帧能把它一起拍进去。
+	if step.ShotRef != "" {
+		if highlighter, ok := insp.(elementHighlighter); ok {
+			if err := highlighter.Highlight(ctx, step.ShotRef); err == nil {
+				defer func() { _ = highlighter.ClearHighlight(context.WithoutCancel(ctx)) }()
+				// 等一帧再抓：刚插入的覆盖层可能还没合成，拍出来会缺框
+				time.Sleep(80 * time.Millisecond)
+			}
+		}
 	}
-	shooter, ok := insp.(stepShooter)
-	if !ok {
-		return ""
-	}
-	rel := filepath.Join("shots", fmt.Sprintf("%s-%s.jpg", time.Now().Format("150405.000"), sanitizeTool(step.Tool)))
-	path := filepath.Join(sessDir, rel)
-	if _, err := shooter.StepJPEG(ctx, path, step.ShotRef); err != nil {
+	rel, err := m.SaveScreenJPEG(ctx, id, step.Tool, shotMaxWidth)
+	if err != nil {
 		m.log.Warn("步骤截图失败", "err", err, "tool", step.Tool)
 		return ""
 	}
@@ -297,7 +314,7 @@ var _ = store.Event{}.Shot
 
 // Clip 返回某一步前后各 2 秒的短视频路径（按需切片并缓存）。
 //
-// 为什么是懒切片：报告里没人看的那一步不该在收尾时花时间编码。
+// 为什么是懒切片：记录里没人看的那一步不该在收尾时花时间编码。
 // 切片用固定窗口而不是「等动画结束」——可预期，也够用。
 func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) {
 	sess, err := m.Get(ctx, id)
@@ -340,7 +357,7 @@ func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) 
 		"-ss", fmt.Sprintf("%.2f", float64(startMS)/1000),
 		"-i", sess.VideoPath,
 		"-t", fmt.Sprintf("%.2f", float64(lengthMS)/1000),
-		// 报告里内联播放，960 宽足够看清界面，体积只有 1080p 的三分之一
+		// 记录里内联播放，960 宽足够看清界面，体积只有 1080p 的三分之一
 		"-vf", "scale='min(960,iw)':-2",
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
 		"-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an",

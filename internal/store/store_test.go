@@ -80,7 +80,7 @@ func TestAppendEventAssignsIncreasingSeq(t *testing.T) {
 		t.Fatalf("写入会话失败: %v", err)
 	}
 
-	for _, tool := range []string{"snapshot", "click", "screenshot"} {
+	for _, tool := range []string{"capture", "click", "screenshot"} {
 		if _, err := s.AppendEvent(ctx, Event{
 			SessionID: "s-2", At: time.Now(), Tool: tool,
 			Args: json.RawMessage(`{"x":1}`), OK: true, DurationMS: 12, VideoOffsetMS: 1500,

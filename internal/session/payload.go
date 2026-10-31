@@ -46,6 +46,13 @@ type AssetSlot struct {
 	Name     string `json:"name"`
 	Path     string `json:"path"`
 	Required bool   `json:"required"`
+	// Writable 素材目录是否可写。
+	//
+	// 默认只读是对的（素材被会话写坏，下次验收就不是同一份输入了）。但很多应用
+	// 会把"目录不可写"直接判成"没有访问权限"，然后弹一个原生授权窗等人点——
+	// 在无人操作的机器上就是永久等待。这类应用（媒体库、素材库、下载目录）
+	// 必须在 rig.json 里明写 writable，否则它连正常启动都做不到。
+	Writable bool `json:"writable"`
 	// Env 可选：把挂载路径写进这个环境变量，免得应用找不到
 	Env string `json:"env"`
 }
@@ -127,7 +134,7 @@ func (m *Manager) resolvePayload(ctx context.Context, dir, raw string, assets ma
 		// /app 会在半路变成"一半旧文件一半新文件"，这次验收的证据就废了。
 		input.Dir = filepath.Join(dir, "payload")
 		if materialize {
-			if err := snapshotTree(src.Path, input.Dir); err != nil {
+			if err := snapshotTree(src.Path, input.Dir, false); err != nil {
 				return payloadInput{}, err
 			}
 		}
@@ -334,10 +341,12 @@ func (m *Manager) resolveAssets(ctx context.Context, sessionDir string, slots []
 			if info, err := os.Stat(src.Path); err != nil || !info.IsDir() {
 				return nil, fmt.Errorf("素材目录不存在：%s", src.Path)
 			}
-			// 素材同样快照：一次会话里"给了哪些字节"必须是确定的
+			// 素材同样快照：一次会话里"给了哪些字节"必须是确定的。
+			// 可写槽位不能走硬链接：写进去会直接改掉宿主上的原件，
+			// 下次验收拿到的就不是同一份输入了。
 			mount.Dir = filepath.Join(sessionDir, "assets", slot.Name)
 			if materialize {
-				if err := snapshotTree(src.Path, mount.Dir); err != nil {
+				if err := snapshotTree(src.Path, mount.Dir, slot.Writable); err != nil {
 					return nil, err
 				}
 			}
@@ -385,7 +394,11 @@ func decodeAssets(raw string) map[string]string {
 // 硬链接而不是真复制：1.3GB / 一万个文件的产物大约 1 秒、零额外磁盘，
 // 而且之后宿主上重新打包（写新文件或 rename 替换）不会透过链接影响这份快照。
 // 跨文件系统（builder 输出在另一个挂载点）时自动退化成复制。
-func snapshotTree(src, dst string) error {
+// snapshotTree 把目录树定格到会话目录：默认硬链接（零拷贝），copyFiles=true 时真复制。
+//
+// 什么时候必须复制：这个目录之后要挂成可写。硬链接的两个名字指向同一个 inode，
+// 容器里写文件就是写宿主上的原件——素材被改掉，下次验收的输入就不一样了。
+func snapshotTree(src, dst string, copyFiles bool) error {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return fmt.Errorf("读取 %s 失败: %w", src, err)
@@ -420,9 +433,33 @@ func snapshotTree(src, dst string) error {
 			}
 			return os.Symlink(link, target)
 		default:
+			if copyFiles {
+				return copyFile(path, target, entryInfo.Mode())
+			}
 			return linkOrCopyFile(path, target, entryInfo.Mode())
 		}
 	})
+}
+
+// copyFile 真复制一份字节（可写素材用，不能和宿主共享 inode）。
+func copyFile(src, dst string, mode os.FileMode) error {
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // linkOrCopyFile 优先硬链接，失败（跨设备/权限）则复制。

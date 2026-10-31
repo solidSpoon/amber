@@ -55,8 +55,8 @@ export default function Sessions() {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
-        title="验收会话"
-        description="会话由 AI 通过 MCP 创建；这一页只看结果。一个会话 = 一台一次性测试机。"
+        title="会话"
+        description="会话由 AI 通过 MCP 创建，这一页只看结果。一个会话 = 一台一次性机器。"
       />
 
       {error && (
@@ -76,7 +76,7 @@ export default function Sessions() {
             <Empty>
               <EmptyHeader>
                 <EmptyTitle>还没有会话</EmptyTitle>
-                <EmptyDescription>让 AI 通过 MCP 调 start_session 起一台；跑完这里会出现它的报告。</EmptyDescription>
+                <EmptyDescription>让 AI 通过 MCP 调 amber_start 起一台；跑完这里会出现它的记录。</EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : (
@@ -96,12 +96,14 @@ export default function Sessions() {
                   const running = !['finished', 'failed', 'abandoned'].includes(s.status);
                   return (
                     <TableRow key={s.id}>
-                      <TableCell>
-                        <a href={`#/sessions/${s.id}`} className="font-mono text-xs hover:underline">
-                          {s.id}
+                      <TableCell className="max-w-[26rem]">
+                        {/* 标题是这次验收的意图：读者按它认人，会话 ID 退到第二行 */}
+                        <a href={`#/sessions/${s.id}`} className="block hover:underline">
+                          <div className="truncate text-sm font-medium">{s.title || s.app}</div>
+                          <div className="truncate font-mono text-[11px] text-muted-foreground">{s.id}</div>
                         </a>
                       </TableCell>
-                      <TableCell className="max-w-[24rem]">
+                      <TableCell className="max-w-[22rem]">
                         <div className="truncate">{s.app}</div>
                         <div className="truncate font-mono text-[11px] text-muted-foreground">
                           {(s.payload || '—').replace(/^manifest:sha256:/, '')}

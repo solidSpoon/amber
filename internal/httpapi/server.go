@@ -75,13 +75,24 @@ func New(opts Options) *Server {
 	}
 }
 
+// requestTimeout 单个 HTTP 请求的上限：批上限再留 30 秒收尾（收尾那张图要现抓）。
+func (s *Server) requestTimeout() time.Duration {
+	base := 2 * time.Minute
+	if s.cfg != nil && s.cfg.BatchTimeout > 0 {
+		base = s.cfg.BatchTimeout
+	}
+	return base + 30*time.Second
+}
+
 // Handler 返回带中间件的根路由器。
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	// 中间件的超时必须比一批动作的上限更宽：否则请求先被这里砍断，
+	// 客户端拿到一句没有上下文的错误，服务端只剩一行 context canceled。
+	r.Use(middleware.Timeout(s.requestTimeout()))
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -131,7 +142,9 @@ func (s *Server) Handler() http.Handler {
 // ---- 会话 ----------------------------------------------------------------
 
 type sessionDTO struct {
-	ID              string `json:"id"`
+	ID string `json:"id"`
+	// Title 这次验收的意图（一句话），列表和记录顶部先展示它
+	Title           string `json:"title,omitempty"`
 	App             string `json:"app"`
 	Ref             string `json:"ref"`
 	CommitSHA       string `json:"commitSha"`
@@ -184,7 +197,7 @@ func toGeometry(r store.Rect) *geometryDTO {
 
 func toSessionDTO(s store.Session) sessionDTO {
 	dto := sessionDTO{
-		ID: s.ID, App: s.App, Ref: s.Ref, CommitSHA: s.CommitSHA, Status: string(s.Status),
+		ID: s.ID, Title: s.Title, App: s.App, Ref: s.Ref, CommitSHA: s.CommitSHA, Status: string(s.Status),
 		CDPPort: s.CDPPort, VNCPort: s.VNCPort, VideoDurationMS: s.VideoDurationMS,
 		Verdict: s.Verdict, Summary: s.Summary, Error: s.Error,
 		Frame: toGeometry(s.Frame), Display: toGeometry(s.Display),
@@ -233,7 +246,9 @@ type createRequest struct {
 	// Assets 素材槽位 → 来源（槽位由产物自己的 rig.json 声明）
 	Assets map[string]string `json:"assets"`
 	Label  string            `json:"label"`
-	Commit string            `json:"commit"`
+	// Title 这次验收的意图；记录顶部与会话列表用它当标题
+	Title  string `json:"title"`
+	Commit string `json:"commit"`
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +265,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	// 产物已经在 Prepare 里落地并校验过（入口、素材槽位），所以这里失败得快；
 	// 真正的启动仍然在后台跑，进度通过 SSE 推给前端。
 	sess, err := s.manager.Prepare(r.Context(), session.Options{
-		Label: req.Label, Payload: req.Payload, Assets: req.Assets, Commit: req.Commit,
+		Label: req.Label, Title: req.Title, Payload: req.Payload, Assets: req.Assets, Commit: req.Commit,
 	})
 	if errors.Is(err, session.ErrTooManySessions) {
 		writeError(w, http.StatusTooManyRequests, err)
@@ -333,6 +348,8 @@ type eventDTO struct {
 	// BatchStartMS/BatchEndMS 这一段连续操作的起止：同一批的几步共用一条片段
 	BatchStartMS int64 `json:"batchStartMs"`
 	BatchEndMS   int64 `json:"batchEndMs"`
+	// BatchIntent 这一段操作为什么做（run 的 intent）：记录里当这一段的小标题
+	BatchIntent string `json:"batchIntent,omitempty"`
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +368,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 			DurationMS: e.DurationMS, VideoOffsetMS: e.VideoOffsetMS,
 			Result: e.Result, Artifact: e.ArtifactPath, Shot: e.Shot,
 			Clip: e.VideoOffsetMS >= 0 && hasVideo && session.HasVisual(e.Tool), Frame: toGeometry(e.Frame),
-			BatchStartMS: e.BatchStartMS, BatchEndMS: e.BatchEndMS,
+			BatchStartMS: e.BatchStartMS, BatchEndMS: e.BatchEndMS, BatchIntent: e.BatchIntent,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})

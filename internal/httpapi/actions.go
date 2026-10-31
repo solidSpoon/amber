@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -20,7 +19,7 @@ import (
 	"github.com/solidSpoon/rigd/internal/session"
 )
 
-// stepMeta 是每个动作都能带的报告字段：这一步为什么做、期望看到什么。
+// stepMeta 是每个动作都能带的记录字段：这一步为什么做、期望看到什么。
 type stepMeta struct {
 	Intent string `json:"intent"`
 	Expect string `json:"expect"`
@@ -78,17 +77,14 @@ func (s *Server) actionScreenshot(w http.ResponseWriter, r *http.Request) {
 	_, artifact, err := s.manager.Record(r.Context(), id, session.Step{
 		Tool: "screenshot", Args: map[string]any{"label": req.Label}, Intent: req.Intent, Expect: req.Expect,
 	},
-		func(ctx context.Context, insp session.Inspector) (string, string, error) {
-			sess, err := s.manager.Get(ctx, id)
+		func(ctx context.Context, _ session.Inspector) (string, string, error) {
+			// 整屏截图：和记录里的步骤图同一条链路（原生对话框也在里面）
+			got, err := s.manager.SaveScreenJPEG(ctx, id, label, 1600)
 			if err != nil {
 				return "", "", err
 			}
-			rel = filepath.Join("screenshots", fmt.Sprintf("%s-%s.png", time.Now().Format("150405"), label))
-			n, err := insp.Screenshot(ctx, filepath.Join(sess.Dir, rel))
-			if err != nil {
-				return "", "", err
-			}
-			return fmt.Sprintf("截图已保存：%s（%d 字节）", rel, n), rel, nil
+			rel = got
+			return "截图已保存：" + rel, rel, nil
 		})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -257,11 +253,4 @@ func sanitize(label string) string {
 		out = out[:40]
 	}
 	return out
-}
-
-type assertRequest struct {
-	// Claim 断言内容（一句话），OK 是结论，Evidence 是证据（DOM 片段/数值/日志行）
-	Claim    string `json:"claim"`
-	OK       bool   `json:"ok"`
-	Evidence string `json:"evidence"`
 }

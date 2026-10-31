@@ -1,4 +1,4 @@
-// Package session 是调度器：把「一台一次性测试机」做成可创建、可操作、可回收的会话。
+// Package session 是调度器：把「一台一次性机器」做成可创建、可操作、可回收的会话。
 //
 // 状态机（只有调度器能改，HTTP/MCP 都通过它）：
 //
@@ -44,9 +44,6 @@ type Inspector interface {
 	Fill(ctx context.Context, ref, text string) error
 	Press(ctx context.Context, key string) error
 	Evaluate(ctx context.Context, script string) (json.RawMessage, error)
-	Screenshot(ctx context.Context, path string) (int64, error)
-	// PreviewJPEG 取一帧 JPEG（看板实时预览），不落盘
-	PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
 	Close() error
 }
 
@@ -85,11 +82,13 @@ type liveSession struct {
 type Options struct {
 	// Label 展示名（一般是产物 rig.json 里的 name）；留空时用产物目录名
 	Label string
+	// Title 这次验收的意图（一句话）：记录顶部和会话列表先展示它，而不是一串 ID。
+	Title string
 	// Payload 被测产物：dir:/绝对路径 或 manifest:sha256:…
 	Payload string
 	// Assets 素材槽位 → 来源（槽位由产物自己的 rig.json 声明）
 	Assets map[string]string
-	// Commit 可选的来源版本号，只用于报告溯源
+	// Commit 可选的来源版本号，只用于记录溯源
 	Commit string
 }
 
@@ -190,6 +189,7 @@ func (m *Manager) Prepare(ctx context.Context, opts Options) (store.Session, err
 
 	sess := store.Session{
 		ID:        id,
+		Title:     strings.TrimSpace(opts.Title),
 		App:       label,
 		Ref:       opts.Commit,
 		CommitSHA: opts.Commit,
@@ -306,7 +306,11 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		{Source: payload.Dir, ContainerPath: "/app", ReadOnly: true},
 	}
 	for _, asset := range payload.Assets {
-		mounts = append(mounts, dockerx.Mount{Source: asset.Dir, ContainerPath: asset.Slot.Path, ReadOnly: true})
+		// 只读是默认：会话里被写坏的素材，下一次验收就不是同一个输入了。
+		// rig.json 写了 writable 的槽位才挂成可写（应用把"不可写"当成没权限时必需）。
+		mounts = append(mounts, dockerx.Mount{
+			Source: asset.Dir, ContainerPath: asset.Slot.Path, ReadOnly: !asset.Slot.Writable,
+		})
 	}
 
 	spec := dockerx.Spec{
@@ -513,12 +517,12 @@ func (m *Manager) NowOffset(id string) int64 {
 	return time.Now().UnixMilli() - live.recordingStartMs
 }
 
-// SetBatchWindow 给 [fromSeq, toSeq] 这一段补上批次起止。
-func (m *Manager) SetBatchWindow(ctx context.Context, id string, fromSeq, toSeq int, startMS, endMS int64) error {
+// SetBatchMeta 给 [fromSeq, toSeq] 这一段补上批次起止与意图。
+func (m *Manager) SetBatchMeta(ctx context.Context, id string, fromSeq, toSeq int, startMS, endMS int64, intent string) error {
 	if fromSeq > toSeq {
 		return nil
 	}
-	return m.store.SetBatchWindow(ctx, id, fromSeq, toSeq, startMS, endMS)
+	return m.store.SetBatchMeta(ctx, id, fromSeq, toSeq, startMS, endMS, intent)
 }
 
 // Touch 记录一次活动，顺延空闲回收时间点。
@@ -569,11 +573,17 @@ func (m *Manager) inspector(ctx context.Context, id string) (Inspector, error) {
 //
 // 所有对外动作都必须走这里，否则审计会出现空洞——那正是这个项目最不能接受的。
 func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (string, string, error) {
+	_, result, artifact, err := m.RecordStep(ctx, id, step, fn)
+	return result, artifact, err
+}
+
+// RecordStep 与 Record 相同，但把记完的这一步也交回来（capture 要用它取那张画面）。
+func (m *Manager) RecordStep(ctx context.Context, id string, step Step, fn func(ctx context.Context, insp Inspector) (result string, artifact string, err error)) (Step, string, string, error) {
 	insp, err := m.inspector(ctx, id)
 	if err != nil {
 		step.Caption = captionFor(step, nil)
 		m.writeEvent(ctx, id, step, err.Error(), "", 0, false, -1)
-		return "", "", err
+		return step, "", "", err
 	}
 
 	started := time.Now()
@@ -613,27 +623,28 @@ func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx 
 		step.Caption = captionFor(step, describe(insp, step))
 	}
 	ok := callErr == nil
-	if step.Passed != nil {
-		ok = *step.Passed
-	}
-	// 只给"需要看现场"的步骤配图：失败的、断言的。
-	// 每步都截一张的话，一批 30 步光截图就多花三四秒，而报告里根本不逐行展示它们。
-	wantShot := !ok
-	if wantShot {
-		if sess, err := m.Get(ctx, id); err == nil && sess.Dir != "" {
-			step.Shot = m.captureShot(ctx, sess.Dir, insp, step)
+	// 审计不能因为 ctx 被取消就丢：超时、客户端断开正是最需要留下记录的时刻。
+	// （之前这里用原 ctx，一步超时后连"这一步失败了"都写不进去。）
+	auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer auditCancel()
+
+	// 只给"需要看现场"的步骤配图：失败的，以及 capture 这种"这一步的价值就是那张图"的。
+	// 其余每步都截一张的话，一批 30 步光截图就多花好几秒，而记录里并不逐行展示它们。
+	if (!ok || step.AlwaysShot) && step.Shot == "" {
+		if sess, err := m.Get(auditCtx, id); err == nil && sess.Dir != "" {
+			step.Shot = m.captureShot(auditCtx, id, sess.Dir, insp, step)
 		}
 	}
-	m.writeEvent(ctx, id, step, msg, artifact, duration.Milliseconds(), ok, offset)
+	m.writeEvent(auditCtx, id, step, msg, artifact, duration.Milliseconds(), ok, offset)
 
 	// 应用可能在动作的副作用里自己改窗口（登录后切全屏、从大窗缩回默认尺寸）。
-	// 记在动作之后：报告里的顺序就是「点了什么 → 应用因此变成了什么样」。
+	// 记在动作之后：记录里的顺序就是「点了什么 → 应用因此变成了什么样」。
 	m.syncFrame(ctx, id, insp)
 
 	if callErr != nil {
-		return "", artifact, callErr
+		return step, "", artifact, callErr
 	}
-	return result, artifact, nil
+	return step, result, artifact, nil
 }
 
 func (m *Manager) writeEvent(ctx context.Context, id string, step Step, result, artifact string, durationMS int64, ok bool, offset int64) {
@@ -649,7 +660,7 @@ func (m *Manager) writeEvent(ctx context.Context, id string, step Step, result, 
 	if caption == "" {
 		caption = captionFor(step, nil)
 	}
-	// 记下写这条记录时窗口的矩形：报告按它裁剪片段，窗口中途变过也不会错位
+	// 记下写这条记录时窗口的矩形：记录按它裁剪片段，窗口中途变过也不会错位
 	m.mu.Lock()
 	frame := store.Rect{}
 	if live, ok := m.live[id]; ok {
@@ -875,17 +886,7 @@ func (m *Manager) Machines(ctx context.Context) ([]MachineView, error) {
 
 // Preview 取会话的一帧预览（不写审计：看板刷屏不应污染验收记录）。
 func (m *Manager) Preview(ctx context.Context, id string, quality int) ([]byte, error) {
-	insp, err := m.inspector(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	preview, ok := insp.(interface {
-		PreviewJPEG(ctx context.Context, quality int) ([]byte, error)
-	})
-	if !ok {
-		return nil, errors.New("当前检查器不支持预览帧")
-	}
-	return preview.PreviewJPEG(ctx, quality)
+	return m.ScreenJPEG(ctx, id, previewMaxWidth)
 }
 
 // cachedStats 3 秒内的容器统计直接复用。
@@ -999,6 +1000,10 @@ func isTransportError(err error) bool {
 	for _, marker := range []string{
 		"use of closed network connection", "connection reset", "broken pipe",
 		"EOF", "CDP 连接已关闭", "i/o timeout", "connection refused",
+		// 页面自己导航/刷新（eval 里 location.reload、应用内部跳转）会换掉调试目标：
+		// 这不是"操作失败"，重连一次就能接着往下走。
+		"Inspected target navigated", "Cannot find context with specified id",
+		"Execution context was destroyed", "Target closed",
 	} {
 		if strings.Contains(msg, marker) {
 			return true
@@ -1121,7 +1126,7 @@ func (m *Manager) syncFrame(ctx context.Context, id string, insp Inspector) {
 	m.mu.Unlock()
 
 	// 这是证据，不是内部细节：应用自己把窗口缩小了，评审必须看得见。
-	// 记成报告里独立的一步（带当时的画面），而不是一行服务端日志。
+	// 记成记录里独立的一步（带当时的画面），而不是一行服务端日志。
 	note := Step{
 		Tool: "window",
 		Kind: "note",
@@ -1131,7 +1136,7 @@ func (m *Manager) syncFrame(ctx context.Context, id string, insp Inspector) {
 		},
 		Caption: fmt.Sprintf("窗口尺寸变化：%dx%d → %dx%d", prev.Width, prev.Height, frame.Width, frame.Height),
 	}
-	note.Shot = m.captureShot(ctx, sess.Dir, insp, note)
+	note.Shot = m.captureShot(ctx, id, sess.Dir, insp, note)
 	m.writeEvent(ctx, id, note, "应用自己调整了窗口尺寸，画面几何已更新", "", 0, true, m.videoOffset(id))
 	m.log.Info("窗口尺寸变化", "session", id,
 		"from", fmt.Sprintf("%dx%d", prev.Width, prev.Height),

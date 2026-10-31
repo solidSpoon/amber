@@ -1,23 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Button } from '@/components/ui/button';
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { PageHeader } from '@/components/page-header';
-import { StatusBadge, VerdictBadge } from '@/components/session-badges';
-import {
-  api,
-  formatAgo,
-  formatBytes,
-  machineName,
-  type Feedback,
-  type Machine,
-  type RuntimeInfo,
-  type Sample,
-  type Session,
-} from '../api';
+import { api, formatBytes, machineName, type Machine, type RuntimeInfo, type Sample } from '../api';
 
 /**
  * 首页看板：每台候选机器的实时屏幕 + 宿主资源 + 最近会话。
@@ -29,28 +14,18 @@ import {
 export default function Dashboard() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [samples, setSamples] = useState<Sample[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
   const [info, setInfo] = useState<RuntimeInfo | null>(null);
-  const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let alive = true;
     async function load() {
       try {
-        const [m, s, list, meta, fb] = await Promise.all([
-          api.machines(),
-          api.metrics(),
-          api.listSessions(),
-          api.info(),
-          api.feedback(),
-        ]);
+        const [m, s, meta] = await Promise.all([api.machines(), api.metrics(), api.info()]);
         if (!alive) return;
         setMachines(m.machines ?? []);
         setSamples(s.samples ?? []);
-        setSessions((list.sessions ?? []).slice(0, 5));
         setInfo(meta);
-        setFeedback(fb.feedback ?? []);
         setError('');
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : String(err));
@@ -68,31 +43,35 @@ export default function Dashboard() {
   const latest = samples.at(-1);
 
   return (
-    <div className="flex flex-col gap-8">
-      <PageHeader
-        title="验收看板"
-        description="每台机器是一台一次性测试电脑：起容器、构建应用、全程录屏，结束后销毁。"
-      />
-
-      {error && (
-        <Card className="border-destructive/30 bg-destructive/5">
-          <CardContent className="text-sm text-destructive">读取看板数据失败：{error}</CardContent>
-        </Card>
-      )}
-
-      <section className="grid gap-6 lg:grid-cols-2">
-        {machines.length === 0 && !error && (
-          <>
-            <MonitorSkeleton />
-            <MonitorSkeleton />
-          </>
+    <div className="mx-auto flex w-full max-w-[1680px] flex-col gap-12 px-2 sm:px-6 lg:px-10">
+      {/* 第一屏：只有机器。
+          不放标题、不放说明——看板要回答的就一句"现在台上是什么"，
+          一屏两台机器，往下翻才是数字和流水。 */}
+      {/* 高度按"视口高度减去外面几层 padding"算：main 的 p-4/6/8 + 这里的 py。
+          算准了，第一屏底部就不会漏出下一节的边。 */}
+      <section className="flex min-h-[calc(100svh-2rem)] flex-col justify-center gap-10 py-6 md:min-h-[calc(100svh-3rem)] lg:min-h-[calc(100svh-4rem)] lg:py-10">
+        {error && (
+          <Card className="border-destructive/30 bg-destructive/5">
+            <CardContent className="text-sm text-destructive">读取看板数据失败：{error}</CardContent>
+          </Card>
         )}
-        {machines.map((m) => (
-          <MachineCard key={m.slot} machine={m} display={info?.display} />
-        ))}
+        <div className="grid items-end gap-14 md:grid-cols-2 md:gap-16 lg:gap-24">
+          {machines.length === 0 && !error && (
+            <>
+              <MonitorSkeleton />
+              <MonitorSkeleton />
+            </>
+          )}
+          {machines.map((m) => (
+            <MachineCard key={m.slot} machine={m} />
+          ))}
+        </div>
       </section>
 
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      {/* 往下翻：资源与流水 */}
+      {/* 不用分割线分屏：线会把第一屏"切开"，而且滚动时那根线会卡在视口边缘。
+          两屏的关系靠留白和滚动本身表达：一屏是"台上"，一屏是"账本"。 */}
+      <section className="grid gap-4 pt-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat
           label="宿主 CPU"
           value={latest ? `${latest.cpuPct.toFixed(0)}%` : '—'}
@@ -115,89 +94,6 @@ export default function Dashboard() {
         />
       </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>最近会话</CardTitle>
-          <CardDescription>点会话号进入详情：录像、操作时间线、日志都在那儿。</CardDescription>
-          <CardAction>
-            <Button variant="outline" size="sm" render={<a href="#/sessions" />}>
-              全部会话
-            </Button>
-          </CardAction>
-        </CardHeader>
-        <CardContent>
-          {sessions.length === 0 ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle>还没有会话</EmptyTitle>
-                <EmptyDescription>去「验收会话」新建一台，起容器要几分钟。</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : (
-            <Table>
-              <TableBody>
-                {sessions.map((s) => (
-                  <TableRow key={s.id}>
-                    <TableCell>
-                      <a href={`#/sessions/${s.id}`} className="font-mono text-xs hover:underline">
-                        {s.id}
-                      </a>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {s.app} <span className="font-mono text-xs">{s.ref || '—'}</span>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={s.status} />
-                    </TableCell>
-                    <TableCell>
-                      <VerdictBadge verdict={s.verdict} />
-                    </TableCell>
-                    <TableCell className="text-right text-xs text-muted-foreground">
-                      {formatAgo(s.createdAt)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* 建议来自 AI 自己：用完这套工作流后觉得哪里别扭，就写在这里。
-          它不进验收报告——报告只讲那次验收发生了什么。 */}
-      <Card>
-        <CardHeader>
-          <CardTitle>工作流建议</CardTitle>
-          <CardDescription>AI 用完这套流程后留下的意见，用来改产品本身。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {feedback.length === 0 ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle>还没有建议</EmptyTitle>
-                <EmptyDescription>AI 觉得哪里别扭时，会通过 feedback 留下意见。</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : (
-            <div className="flex flex-col divide-y">
-              {feedback.map((f) => (
-                <div key={f.id} className="flex flex-col gap-1 py-2 first:pt-0 last:pb-0">
-                  <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                    <span>{formatAgo(f.at)}</span>
-                    {f.rating > 0 && <span>· 评分 {f.rating}/5</span>}
-                    {f.sessionId && (
-                      <a href={`#/sessions/${f.sessionId}`} className="font-mono hover:underline">
-                        · {f.sessionId}
-                      </a>
-                    )}
-                  </div>
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{f.body}</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -244,10 +140,12 @@ function MonitorSkeleton() {
  * 一台机器：外壳（边框/支架/阴影）+ 屏幕（实时画面或关机态）。
  *
  * 拟物要克制：只做"这块是屏幕"的暗示（内凹、圆角、轻微反光），
- * 不加渐变色块和花哨装饰，否则在浅色界面里会显脏。
- * 屏幕内部颜色是物理属性（屏幕本来就该是黑的），所以不跟着主题走。
+ * 不加花哨装饰，否则在浅色界面里会显脏。
+ *
+ * 外壳的金属色**写死**，不走主题 token：这里是 Pro Display XDR 那种阳极氧化铝，
+ * 屏幕内部是黑的，都是"物理属性"。品牌色是琥珀，机器是铝，两者混在一起就不像一台真机器了。
  */
-function MachineCard({ machine, display }: { machine: Machine; display?: { width: number; height: number } }) {
+function MachineCard({ machine }: { machine: Machine }) {
   const online = machine.occupied && (machine.status === 'ready' || machine.status === 'starting');
   const screenRef = useRef<HTMLImageElement>(null);
   const [streamFailed, setStreamFailed] = useState(false);
@@ -261,12 +159,23 @@ function MachineCard({ machine, display }: { machine: Machine; display?: { width
 
   return (
     <article className="mx-auto flex w-full max-w-[880px] flex-col items-center">
-      {/* 机身 */}
-      <div className="w-full rounded-[26px] bg-muted p-3 shadow-[0_18px_40px_-24px_rgba(0,0,0,0.45)] ring-1 ring-border">
-        {/* 屏幕（内凹）；按真实分辨率画比例，1920x1080 就是 16:9，1280x800 就是 16:10 */}
+      {/* 机身用 Apple 官方那张设备渲染图当外框（public/img/frame.png）。
+          那张图本身是"透明屏"素材：屏幕区域是全透明的洞，周围的机器是不透明的，
+          所以内容是**垫在下面**、透过洞露出来的，不是贴在图上。
+
+          屏幕矩形是量出来的：原图 1912×1633 里，屏在 x 46→1873、y 46→1073。
+          换成百分比写在下面，换一张分辨率不同的渲染图时只需要重算这四个数。 */}
+      <div className="relative w-full" style={{ aspectRatio: '1912 / 1633' }}>
+        {/* 内容比洞大 3px 的四周：外框内沿有一圈抗锯齿的半透明像素，
+            正好贴上会漏出一条白边，压进去一点就没了（多出来的部分被黑边框盖住）。 */}
         <div
-          className="relative overflow-hidden rounded-[16px] bg-neutral-950 shadow-inner ring-1 ring-black/40"
-          style={{ aspectRatio: display ? `${display.width} / ${display.height}` : '16 / 9' }}
+          className="absolute overflow-hidden bg-black"
+          style={{
+            left: 'calc(2.197% - 3px)',
+            top: 'calc(2.572% - 3px)',
+            width: 'calc(95.607% + 6px)',
+            height: 'calc(62.952% + 6px)',
+          }}
         >
           {online && screenSrc && !streamFailed ? (
             <img
@@ -278,14 +187,14 @@ function MachineCard({ machine, display }: { machine: Machine; display?: { width
               onError={() => setStreamFailed(true)}
             />
           ) : (
-            <PoweredOff machine={machine} />
+            <LockScreen machine={machine} />
           )}
 
           {/* 屏幕反光：一条很淡的斜向高光，让"这是块玻璃"成立但不抢内容 */}
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-transparent" />
 
           {online && (
-            <div className="absolute top-3 left-3 flex items-center gap-2 rounded-full bg-neutral-950/60 px-2.5 py-1 text-[11px] font-medium text-neutral-50 backdrop-blur">
+            <div className="absolute top-2 left-2 flex items-center gap-2 rounded-full bg-neutral-950/60 px-2.5 py-1 text-[10px] font-medium text-neutral-50 backdrop-blur">
               <span className="relative flex size-1.5">
                 <span className="absolute inline-flex size-full animate-ping rounded-full bg-success opacity-75" />
                 <span className="relative inline-flex size-1.5 rounded-full bg-success" />
@@ -294,11 +203,16 @@ function MachineCard({ machine, display }: { machine: Machine; display?: { width
             </div>
           )}
         </div>
-      </div>
 
-      {/* 支架：颈 + 底座，做出"屏幕立在桌面上"的体积感 */}
-      <div className="h-5 w-16 bg-muted shadow-[inset_0_-6px_8px_-6px_rgba(0,0,0,0.35)]" />
-      <div className="h-2 w-48 rounded-[3px] bg-muted shadow-[0_6px_16px_-8px_rgba(0,0,0,0.5)]" />
+        {/* 外框压在内容上面；不接鼠标事件，免得挡住里面本来就有的交互 */}
+        <img
+          src="/img/frame.png"
+          alt=""
+          aria-hidden
+          draggable={false}
+          className="pointer-events-none absolute inset-0 size-full select-none"
+        />
+      </div>
 
       {/* 铭牌 */}
       <div className="mt-3 flex w-full flex-col gap-1 px-1">
@@ -307,8 +221,10 @@ function MachineCard({ machine, display }: { machine: Machine; display?: { width
             <span className="text-sm font-semibold">{machineName(machine.slot)}</span>
             {online ? (
               <Badge variant="success">{machine.status === 'starting' ? '启动中' : (machine.app ?? '占用中')}</Badge>
+            ) : machine.occupied && machine.status === 'starting' ? (
+              <Badge variant="warning">启动中</Badge>
             ) : (
-              <Badge variant="outline">已关机</Badge>
+              <Badge variant="outline">空闲</Badge>
             )}
           </div>
           {online && machine.sessionId && (
@@ -340,18 +256,77 @@ function MachineCard({ machine, display }: { machine: Machine; display?: { width
   );
 }
 
-/** 关机态：屏幕是暗的，只留一点点光与状态字，暗示"这块屏还在，只是没开" */
-function PoweredOff({ machine }: { machine: Machine }) {
+/**
+ * 空闲态：macOS 锁屏。
+ *
+ * 为什么不画黑屏：黑屏只说明"没信号"，锁屏说明"这台机器在，只是没人用"。
+ * 看板上两台机器大部分时间都是空的，一整块黑反而像坏了；锁屏既安静又带信息（时间、机器名）。
+ *
+ * 壁纸不用图片，用三层柔光斑 + 深底堆出来——单文件二进制里不想再多一张几百 K 的 JPEG。
+ * 字号用容器查询单位（cqw），所以屏幕缩到多小，锁屏元素都按比例缩，不会溢出。
+ */
+function LockScreen({ machine }: { machine: Machine }) {
   const starting = machine.occupied && machine.status === 'starting';
+  const now = useClock();
+
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const week = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][now.getDay()];
+  const date = `${now.getMonth() + 1}月${now.getDate()}日 ${week}`;
+
   return (
-    <div className="flex size-full flex-col items-center justify-center gap-3 bg-[radial-gradient(circle_at_50%_30%,rgba(255,255,255,0.06),transparent_60%)] text-neutral-500">
-      <div className="flex size-9 items-center justify-center rounded-full border border-neutral-700/70">
-        <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path d="M12 3v9" strokeLinecap="round" />
-          <path d="M6.5 7a8 8 0 1 0 11 0" strokeLinecap="round" />
-        </svg>
+    <div className="@container relative size-full overflow-hidden bg-[#0b1524]">
+      {/* 壁纸：四团柔光叠成一层"流动的"渐变（桃 / 青 / 紫 / 玫），跟新版 macOS 的默认壁纸同一路数。
+          纯 CSS 叠出来，不放图片：单文件二进制里不想多几百 K，而且缩放不糊。
+          外面套一层 blur 是为了把渐变之间的过渡抹平，不然能看见硬边。 */}
+      <div className="absolute inset-0 bg-[#140b1e]" />
+      <div
+        className="absolute -inset-[12%] blur-[38px] saturate-[1.05]"
+        style={{
+          background: [
+            'radial-gradient(38% 44% at 16% 14%, #ff9d6c 0%, rgba(255,157,108,0) 58%)',
+            'radial-gradient(42% 46% at 78% 20%, #63d8dd 0%, rgba(99,216,221,0) 60%)',
+            'radial-gradient(46% 50% at 66% 82%, #a469e6 0%, rgba(164,105,230,0) 62%)',
+            'radial-gradient(40% 44% at 26% 74%, #f0568c 0%, rgba(240,86,140,0) 58%)',
+            'radial-gradient(60% 60% at 50% 50%, rgba(24,14,34,0.55) 0%, rgba(24,14,34,0) 70%)',
+          ].join(','),
+        }}
+      />
+      <div className="absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/35" />
+
+      <div className="relative flex size-full flex-col items-center justify-center text-white">
+        <div className="text-[2.1cqw] font-medium text-white/80 [text-shadow:0_1px_3px_rgba(0,0,0,0.45)]">
+          {date}
+        </div>
+        <div className="mt-[0.6cqw] text-[10.5cqw] leading-none font-extralight tracking-[-0.03em] tabular-nums [text-shadow:0_2px_14px_rgba(0,0,0,0.45)]">
+          {hh}:{mm}
+        </div>
+
+        <div className="mt-[3.2cqw] flex items-center gap-[1.4cqw] rounded-full bg-white/10 py-[0.9cqw] pr-[2.4cqw] pl-[0.9cqw] ring-1 ring-white/15 backdrop-blur-md">
+          <div className="grid size-[4.4cqw] place-items-center rounded-full bg-white/20 text-[1.9cqw] font-semibold text-white/90">
+            {machineName(machine.slot).slice(0, 1)}
+          </div>
+          <div className="flex flex-col items-start leading-tight">
+            <span className="text-[2cqw] font-medium">{machineName(machine.slot)}</span>
+            <span className="text-[1.5cqw] text-white/65">
+              {starting ? '正在启动…' : '空闲，等待接单'}
+            </span>
+          </div>
+        </div>
       </div>
-      <div className="text-[11px] tracking-wide">{starting ? '正在启动…' : '已关机'}</div>
+
+      {/* 玻璃反光：一条很淡的斜向高光，和在线时的反射保持一致 */}
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-transparent" />
     </div>
   );
+}
+
+/** 锁屏上的时钟：一分钟跳一次就够，不用每帧渲染 */
+function useClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 20_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return now;
 }

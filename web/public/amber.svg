@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 由 cmd/ambericon 生成，不要手改；要改形状/配色请改那个文件。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="100 100 824 824" width="64" height="64" role="img" aria-label="Amber">
+  <defs>
+    <clipPath id="tile">
+      <rect x="100" y="100" width="824" height="824" rx="185.4"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect x="100" y="100" width="824" height="824" fill="#1C5568"/>
+    <path d="M100 100L660 100 C497.45 282.7 310.79 436.03 100 560Z" fill="#4E97AB"/>
+    <path d="M660 100 C497.45 282.7 310.79 436.03 100 560" fill="none" stroke="#C9EDF3" stroke-width="3" opacity="0.4"/>
+    <circle cx="600" cy="690" r="92" fill="#041A22"/>
+  </g>
+</svg>
