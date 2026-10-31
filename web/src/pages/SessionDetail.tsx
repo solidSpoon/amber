@@ -137,17 +137,29 @@ export default function SessionDetail({ id }: { id: string }) {
           </EmptyHeader>
         </Empty>
       ) : (
-        <ol className="divide-y divide-border/70">
-          {events.map((event, index) => (
-            <StepRow
-              key={event.seq}
-              sessionId={session.id}
-              event={event}
-              gapMs={gapBefore(events, index)}
-              display={session.display}
-              isClipAnchor={clipAnchor.get(event.seq) === event.seq}
-              onZoom={() => setZoomed(event)}
-            />
+        <ol className="flex flex-col">
+          {batchGroups(events).map((group) => (
+            <li key={group.start} className={group.start >= 0 ? 'border-l-2 border-border/60 pl-4' : 'pl-0'}>
+              {/* 一批 = 一次连续操作，只有一条片段；把它的几步归到一组，读者才看得出"这一段是一口气做的" */}
+              {group.start >= 0 && (
+                <div className="flex items-baseline gap-2 pt-4 text-[11px] text-muted-foreground/70">
+                  <span>连续 {group.events.length} 步</span>
+                  <span className="font-mono tabular-nums">{formatClock(group.start / 1000)}</span>
+                </div>
+              )}
+              <ol className="divide-y divide-border/50">
+                {group.events.map((event) => (
+                  <StepRow
+                    key={event.seq}
+                    sessionId={session.id}
+                    event={event}
+                    display={session.display}
+                    isClipAnchor={clipAnchor.get(event.seq) === event.seq}
+                    onZoom={() => setZoomed(event)}
+                  />
+                ))}
+              </ol>
+            </li>
           ))}
         </ol>
       )}
@@ -178,32 +190,40 @@ export default function SessionDetail({ id }: { id: string }) {
 function StepRow({
   sessionId,
   event,
-  gapMs,
   display,
   isClipAnchor,
   onZoom,
 }: {
   sessionId: string;
   event: SessionEvent;
-  gapMs: number;
   display?: Session['display'];
   isClipAnchor: boolean;
   onZoom: () => void;
 }) {
   const [resultOpen, setResultOpen] = useState(false);
+  // 只读步骤（求值、等待）不改界面，也不需要画面：压成一行，别和有画面的动作抢版面
+  const isReadOnly = event.tool === 'eval' || event.tool === 'wait';
   const isAssert = event.kind === 'assert';
   const isNote = event.kind === 'note';
   const failed = !event.ok;
   // 同一批只有第一条带片段；截图类步骤用自己的截图。
   const hasMedia = Boolean(event.shot) || (event.clip && isClipAnchor);
 
+  if (isReadOnly) {
+    return (
+      <li className="flex items-baseline gap-2 py-1 text-[11px] text-muted-foreground/75">
+        <span className="font-mono tabular-nums">{String(event.seq).padStart(2, '0')}</span>
+        <span>{event.caption}</span>
+        <span className="truncate">{resultHead(event.result)}</span>
+        <span className="ml-auto font-mono tabular-nums text-muted-foreground/50">
+          {formatClock(Math.max(0, event.videoOffsetMs) / 1000)}
+        </span>
+      </li>
+    );
+  }
+
   return (
     <>
-      {gapMs >= 15000 && (
-        <li className="py-2 text-center text-[11px] text-muted-foreground/70">
-          · 这之间 {formatClock(gapMs / 1000)} 没有操作（模型在思考） ·
-        </li>
-      )}
       <li
         className={`grid gap-3 py-5 md:gap-6 ${
           hasMedia ? 'md:grid-cols-[minmax(0,1fr)_clamp(340px,46vw,640px)]' : 'md:grid-cols-1'
@@ -574,6 +594,20 @@ function LogPanel({ sessionId }: { sessionId: string }) {
 }
 
 
+/** 按「一段连续操作」分组：报告里同批的步骤归在一起，一批只有一条片段 */
+function batchGroups(events: SessionEvent[]): { start: number; events: SessionEvent[] }[] {
+  const groups: { start: number; events: SessionEvent[] }[] = [];
+  for (const e of events) {
+    const last = groups[groups.length - 1];
+    if (last && last.start === e.batchStartMs) {
+      last.events.push(e);
+      continue;
+    }
+    groups.push({ start: e.batchStartMs, events: [e] });
+  }
+  return groups;
+}
+
 /** 结果的第一行 = 这一步的结论 */
 function resultHead(text: string): string {
   return text.split('\n').find((line) => line.trim() !== '')?.trim() ?? '';
@@ -585,15 +619,6 @@ function resultRest(text: string): string {
   const first = lines.findIndex((line) => line.trim() !== '');
   if (first < 0) return '';
   return lines.slice(first + 1).join('\n').trim();
-}
-
-/** 与上一步之间的空窗（毫秒）：报告的节奏靠它，不靠录像 */
-function gapBefore(events: SessionEvent[], index: number): number {
-  // 第一步之前不标空窗：那段是启动 + 模型第一次思考，没有参照点
-  if (index === 0) return 0;
-  const prev = new Date(events[index - 1].at).getTime();
-  const cur = new Date(events[index].at).getTime();
-  return Math.max(0, cur - prev);
 }
 
 /** 秒数 → m:ss */
