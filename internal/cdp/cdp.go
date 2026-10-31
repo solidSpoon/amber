@@ -18,8 +18,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Target 一个可调试目标（Electron 的渲染进程就是一个 page target）。
-type Target struct {
+// target 一个可调试目标（Electron 的渲染进程就是一个 page target）。
+type target struct {
 	ID                   string `json:"id"`
 	Type                 string `json:"type"`
 	Title                string `json:"title"`
@@ -46,8 +46,8 @@ type rawResponse struct {
 	} `json:"error"`
 }
 
-// ListTargets 读 /json/list，拿到该端口上所有可调试目标。
-func ListTargets(ctx context.Context, port int, timeout time.Duration) ([]Target, error) {
+// listTargets 读 /json/list，拿到该端口上所有可调试目标。
+func listTargets(ctx context.Context, port int, timeout time.Duration) ([]target, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
@@ -68,7 +68,7 @@ func ListTargets(ctx context.Context, port int, timeout time.Duration) ([]Target
 		return nil, fmt.Errorf("CDP 目标列表返回 %d", resp.StatusCode)
 	}
 
-	var targets []Target
+	var targets []target
 	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
 		return nil, fmt.Errorf("解析目标列表失败: %w", err)
 	}
@@ -86,7 +86,7 @@ func DialPage(ctx context.Context, port int, timeout time.Duration) (*Client, er
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		targets, err := ListTargets(ctx, port, 5*time.Second)
+		targets, err := listTargets(ctx, port, 5*time.Second)
 		if err == nil {
 			for _, t := range targets {
 				if t.Type != "page" || t.WebSocketDebuggerURL == "" {
@@ -128,7 +128,7 @@ func dial(ctx context.Context, wsURL string) (*Client, error) {
 
 // readLoop 把响应按 id 分发给等待者；事件（无 id）直接丢弃。
 func (c *Client) readLoop() {
-	defer c.shutdown()
+	defer func() { _ = c.Close() }()
 	for {
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
@@ -157,8 +157,11 @@ func (c *Client) readLoop() {
 	}
 }
 
-// viewport 取当前页面视口尺寸（失败返回 0，调用方按原尺寸处理）。
-func (c *Client) viewport(ctx context.Context) (float64, float64) {
+// Viewport 当前页面视口尺寸（= 应用窗口内可绘制区域）。
+//
+// 用它校验「窗口是不是真的铺满了虚拟屏」：录屏抓的是整个虚拟屏，
+// 窗口没铺满，录像里就只剩一角有内容。
+func (c *Client) Viewport(ctx context.Context) (int, int, error) {
 	var metrics struct {
 		CSSLayoutViewport struct {
 			ClientWidth  float64 `json:"clientWidth"`
@@ -166,17 +169,9 @@ func (c *Client) viewport(ctx context.Context) (float64, float64) {
 		} `json:"cssLayoutViewport"`
 	}
 	if err := c.Call(ctx, "Page.getLayoutMetrics", nil, &metrics); err != nil {
-		return 0, 0
+		return 0, 0, err
 	}
-	return metrics.CSSLayoutViewport.ClientWidth, metrics.CSSLayoutViewport.ClientHeight
-}
-
-// Viewport 当前页面视口尺寸（= 应用窗口内可绘制区域）。
-//
-// 用它校验「窗口是不是真的铺满了虚拟屏」：录屏抓的是整个虚拟屏，
-// 窗口没铺满，录像里就只剩一角有内容。
-func (c *Client) Viewport(ctx context.Context) (int, int, error) {
-	w, h := c.viewport(ctx)
+	w, h := metrics.CSSLayoutViewport.ClientWidth, metrics.CSSLayoutViewport.ClientHeight
 	if w <= 0 || h <= 0 {
 		return 0, 0, errors.New("读不到页面视口尺寸")
 	}
@@ -255,36 +250,6 @@ func (c *Client) Evaluate(ctx context.Context, expression string) (json.RawMessa
 	return out.Result.Value, nil
 }
 
-// Screenshot 截当前页面（PNG base64）。
-func (c *Client) Screenshot(ctx context.Context) (string, error) {
-	return c.capture(ctx, "png", 0)
-}
-
-// ScreenshotJPEG 截 JPEG（看板预览与步骤图用：同样画面体积只有 PNG 的 1/5）。
-//
-// 一律按窗口原始尺寸截，不带 clip/scale：带缩放抓图时，软件合成（没有 GPU）会把
-// 缩放应用到真实画面上，那一瞬间屏幕上显示的是"整个页面缩到左上角"，录屏抓进去
-// 就是每隔一两个正常帧插一张半尺寸的坏帧——片段一循环播放，看着就是一直在闪。
-//
-// quality 取 1~100，0 表示用 CDP 默认值。
-func (c *Client) ScreenshotJPEG(ctx context.Context, quality int) (string, error) {
-	return c.capture(ctx, "jpeg", quality)
-}
-
-func (c *Client) capture(ctx context.Context, format string, quality int) (string, error) {
-	params := map[string]any{"format": format}
-	if quality > 0 {
-		params["quality"] = quality
-	}
-	var out struct {
-		Data string `json:"data"`
-	}
-	if err := c.Call(ctx, "Page.captureScreenshot", params, &out); err != nil {
-		return "", err
-	}
-	return out.Data, nil
-}
-
 // MouseMove 把鼠标移到页面坐标 (x, y) 上。
 //
 // 悬停类交互（鼠标移到单词上弹词典）只认这个：点击只有按下/抬起，
@@ -327,7 +292,7 @@ func (c *Client) KeyPress(ctx context.Context, key string) error {
 	}, nil)
 }
 
-// Close 关闭连接（幂等）。
+// Close 关闭连接（幂等）。读循环结束时也走这里。
 func (c *Client) Close() error {
 	var err error
 	c.once.Do(func() {
@@ -335,13 +300,6 @@ func (c *Client) Close() error {
 		err = c.conn.Close()
 	})
 	return err
-}
-
-func (c *Client) shutdown() {
-	c.once.Do(func() {
-		close(c.closed)
-		_ = c.conn.Close()
-	})
 }
 
 func merge(base map[string]any, eventType string) map[string]any {
