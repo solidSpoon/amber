@@ -219,7 +219,9 @@ func registerRunTool(server *mcp.Server, s *Server) {
 			"hover 把鼠标停在元素上（悬停才出现的浮层，如词典）/ fill 覆盖填写输入框 / " +
 			"press 按键（组合键也行）/ type 往当前焦点打字 / eval 在页面求值 / wait 等条件成立 / assert 记一条断言。" +
 			"press 和 type 走真实键盘输入，页面和原生对话框都收得到。" +
-			"跑完自动附上当前界面（一帧画面 + 可操作元素），不用再单独看一次。" +
+			"跑完自动附上当前界面（一帧画面 + 可操作元素），不用再单独看一次；" +
+			"取画面之前会按 settleMs 等界面响应（默认 400ms）——最后一步是点击/跳转的话，" +
+			"建议把 settleMs 调大，或者干脆用一步 wait 收尾，让界面先稳定下来。" +
 			"时效性靠它保证：拖到第 6 秒立刻悬停/断言，两步之间不会隔着你思考的那几十秒。" +
 			"任何一步失败就停，并告诉你跑到第几步、后面还剩几步。" +
 			"每一步都会在验收报告里各记一条，当作独立的一步来读。",
@@ -272,6 +274,7 @@ type waitArgs struct {
 type runArgs struct {
 	SessionID string      `json:"sessionId" jsonschema:"会话 ID"`
 	Steps     []batchStep `json:"steps" jsonschema:"按顺序执行的步骤（1~50 步）；只做一个动作就传一个元素的数组"`
+	SettleMS  int         `json:"settleMs,omitempty" jsonschema:"跑完后等界面响应多久再取画面，默认 400，最大 5000"`
 }
 
 // runResult 给客户端的结构化结果：每一步的成败、元素表、求值结果。

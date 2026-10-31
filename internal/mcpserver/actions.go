@@ -275,7 +275,21 @@ func (s *Server) doAssert(ctx context.Context, a assertArgs) error {
 const (
 	maxRunSteps = 50
 	runTimeout  = 2 * time.Minute
+	// 默认给界面 400ms 响应时间再取结束画面
+	defaultSettleMS = 400
+	maxSettleMS     = 5000
 )
+
+// settleDuration 把入参归一成一个合理的等待时长。
+func settleDuration(ms int) time.Duration {
+	if ms <= 0 {
+		ms = defaultSettleMS
+	}
+	if ms > maxSettleMS {
+		ms = maxSettleMS
+	}
+	return time.Duration(ms) * time.Millisecond
+}
 
 // batchStep 批里的一步：动作名 + 该动作自己的参数。
 //
@@ -419,6 +433,14 @@ func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error
 	}
 	res.OK = true
 	s.markBatch(ctx, a.SessionID, beforeSeq, batchStartMS)
+	// 跑完先等界面响应一下再取画面：刚点完的界面往往还在动画/加载，
+	// 立刻截会是残影，模型看到的就不是"这一步的结果"。
+	if wait := settleDuration(a.SettleMS); wait > 0 {
+		select {
+		case <-ctx.Done():
+		case <-time.After(wait):
+		}
+	}
 	s.attachCurrent(ctx, a.SessionID, a.Steps, &b, &res)
 	return b.String(), res, nil
 }

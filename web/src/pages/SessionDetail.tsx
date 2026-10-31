@@ -206,8 +206,9 @@ function StepRow({
   const isAssert = event.kind === 'assert';
   const isNote = event.kind === 'note';
   const failed = !event.ok;
-  // 同一批只有第一条带片段；截图类步骤用自己的截图。
-  const hasMedia = Boolean(event.shot) || (event.clip && isClipAnchor);
+  // 每批只放一条片段；失败的步骤额外配它自己的截图（那时最需要看现场）。
+  // 其余步骤不逐行再摆截图：视频和截图交替出现，读者会以为片段在乱给。
+  const hasMedia = Boolean(event.clip && isClipAnchor) || (failed && Boolean(event.shot));
 
   if (isReadOnly) {
     return (
@@ -315,7 +316,7 @@ function StepMedia({
   isClipAnchor: boolean;
   onZoom: () => void;
 }) {
-  // 同一批共用一条片段，只有这批的第一行放视频，其余步骤用自己那张截图
+  // 同一批共用一条片段，只有这批的第一行放视频
   const showClip = Boolean(event.clip) && isClipAnchor;
   const ref = useRef<HTMLVideoElement>(null);
   const [inView, setInView] = useState(false);
