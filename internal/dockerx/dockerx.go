@@ -9,11 +9,10 @@ package dockerx
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,11 +50,11 @@ type Spec struct {
 }
 
 // State 容器状态摘要。
+//
+// 只留在跑与否：调度器要判断的只有"这台机器还能不能用"，
+// 退出码和起止时间从来没人读过（真要排错看会话目录里归档的容器日志）。
 type State struct {
-	Running    bool
-	ExitCode   int
-	StartedAt  time.Time
-	FinishedAt time.Time
+	Running bool
 }
 
 // Runner 容器运行时。
@@ -214,25 +213,14 @@ func (c *CLI) Stop(ctx context.Context, name string, timeout time.Duration) erro
 
 // Inspect 读容器状态。
 func (c *CLI) Inspect(ctx context.Context, name string) (State, error) {
-	format := `{{.State.Running}}|{{.State.ExitCode}}|{{.State.StartedAt}}|{{.State.FinishedAt}}`
-	out, err := c.run(ctx, "inspect", "-f", format, name)
+	out, err := c.run(ctx, "inspect", "-f", "{{.State.Running}}", name)
 	if err != nil {
 		if strings.Contains(err.Error(), "No such object") || strings.Contains(err.Error(), "No such container") {
 			return State{}, ErrContainerNotFound
 		}
 		return State{}, err
 	}
-	parts := strings.Split(strings.TrimSpace(out), "|")
-	if len(parts) != 4 {
-		return State{}, fmt.Errorf("docker inspect 输出无法解析: %q", out)
-	}
-	state := State{
-		Running:  strings.TrimSpace(parts[0]) == "true",
-		ExitCode: atoi(strings.TrimSpace(parts[1])),
-	}
-	state.StartedAt = parseDockerTime(parts[2])
-	state.FinishedAt = parseDockerTime(parts[3])
-	return state, nil
+	return State{Running: strings.TrimSpace(out) == "true"}, nil
 }
 
 // Exec 在容器里跑一条命令，返回 stdout。
@@ -299,24 +287,6 @@ func (c *CLI) run(ctx context.Context, args ...string) (string, error) {
 	return out, nil
 }
 
-// Stream 启动一条长时间运行的容器命令（预留：流式日志）。
-func (c *CLI) Stream(ctx context.Context, args ...string) (io.ReadCloser, error) {
-	cmd := exec.CommandContext(ctx, c.Bin, args...)
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	return pipe, nil
-}
-
-// LabelSelector 生成会话容器的统一标签，便于统计与清理。
-func LabelSelector(sessionID string) string {
-	return "rigd.session=" + sessionID
-}
-
 // DefaultLabels 会话容器的标准标签集合。
 func DefaultLabels(sessionID string) map[string]string {
 	return map[string]string{
@@ -325,42 +295,13 @@ func DefaultLabels(sessionID string) map[string]string {
 	}
 }
 
+// sortedKeys 按字典序返回 map 的 key：docker run 的命令行因此可复现，
+// 日志里比对两次启动的差别时省事。
 func sortedKeys[T any](m map[string]T) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
-	// 稳定顺序，保证 docker run 命令行可复现（日志里比对更省事）
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
+	sort.Strings(keys)
 	return keys
-}
-
-func atoi(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
-// parseDockerTime 解析 docker 的 RFC3339Nano 时间（空值表示未发生）。
-func parseDockerTime(s string) time.Time {
-	s = strings.TrimSpace(s)
-	if s == "" || strings.HasPrefix(s, "0001-01-01") {
-		return time.Time{}
-	}
-	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return t
-	}
-	return time.Time{}
-}
-
-// MarshalJSON 让 Spec 能被直接 dump 进日志（不含敏感信息，目前没有敏感字段）。
-func (s Spec) MarshalJSON() ([]byte, error) {
-	type alias Spec
-	return json.Marshal(alias(s))
 }

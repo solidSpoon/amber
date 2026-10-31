@@ -45,19 +45,23 @@ func (s *Store) ListFeedback(ctx context.Context, limit int) ([]Feedback, error)
 	if err != nil {
 		return nil, fmt.Errorf("读取建议失败: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]Feedback, 0, limit)
-	for rows.Next() {
-		var f Feedback
-		var at string
-		if err := rows.Scan(&f.ID, &at, &f.SessionID, &f.Source, &f.Rating, &f.Body); err != nil {
-			return nil, fmt.Errorf("扫描建议失败: %w", err)
-		}
-		if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
-			f.At = t
-		}
-		out = append(out, f)
+	items, err := scanAll(rows, scanFeedback)
+	if err != nil {
+		return nil, fmt.Errorf("扫描建议失败: %w", err)
 	}
-	return out, rows.Err()
+	return items, nil
+}
+
+func scanFeedback(sc rowScanner) (Feedback, error) {
+	var (
+		f  Feedback
+		at string
+	)
+	if err := sc.Scan(&f.ID, &at, &f.SessionID, &f.Source, &f.Rating, &f.Body); err != nil {
+		return Feedback{}, err
+	}
+	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		f.At = t
+	}
+	return f, nil
 }

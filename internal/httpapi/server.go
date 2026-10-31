@@ -2,8 +2,11 @@
 //
 // 设计取舍：
 //   - 只做「薄适配」：校验参数、调用 session.Manager、把结果转成 DTO，业务逻辑都在 Manager 里；
+//   - 这里只有「看」和「管」两类接口：登录、开/停会话、查记录、取图片。
+//     点按、填表、求值这些操作只走 MCP 一条路——控制台是给读者用的，
+//     同一个动作有两条实现，就一定会有一条先漂（工具名、审计文案、重试策略各不相同）。
 //   - 会话操作全部有副作用，因此除查询外都用 POST，避免被浏览器预取误触发；
-//   - 录像走 http.ServeFile，天然支持 Range，前端拖进度条不需要额外实现；
+//   - 截图/片段走 http.ServeFile，天然支持 Range 与缓存协商；
 //   - SSE 用轮询式推送（每 2s 推一次快照），比给每个会话建长连接简单得多，也够用。
 package httpapi
 
@@ -109,12 +112,6 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/sessions/{id}/events", s.listEvents)
 		api.Get("/sessions/{id}/logs", s.listLogs)
 		api.Get("/sessions/{id}/logs/{source}", s.getLog)
-		api.Post("/sessions/{id}/snapshot", s.actionSnapshot)
-		api.Post("/sessions/{id}/screenshot", s.actionScreenshot)
-		api.Post("/sessions/{id}/eval", s.actionEval)
-		api.Post("/sessions/{id}/click", s.actionClick)
-		api.Post("/sessions/{id}/fill", s.actionFill)
-		api.Post("/sessions/{id}/press", s.actionPress)
 		api.Get("/sessions/{id}/events/{seq}/clip", s.serveClip)
 		// 用通配符而不是单段参数：产物路径带目录（shots/x.jpg、screenshots/x.png）
 		api.Get("/sessions/{id}/artifacts/*", s.serveArtifact)
@@ -371,6 +368,15 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
 }
 
+type feedbackDTO struct {
+	ID        int64  `json:"id"`
+	At        string `json:"at"`
+	SessionID string `json:"sessionId"`
+	Source    string `json:"source"`
+	Rating    int    `json:"rating"`
+	Body      string `json:"body"`
+}
+
 // listFeedback 最近的 AI 建议（给控制台看，也是为了后续集中分析）。
 func (s *Server) listFeedback(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -382,15 +388,11 @@ func (s *Server) listFeedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	out := make([]map[string]any, 0, len(items))
+	out := make([]feedbackDTO, 0, len(items))
 	for _, f := range items {
-		out = append(out, map[string]any{
-			"id":        f.ID,
-			"at":        f.At.UTC().Format(time.RFC3339Nano),
-			"sessionId": f.SessionID,
-			"source":    f.Source,
-			"rating":    f.Rating,
-			"body":      f.Body,
+		out = append(out, feedbackDTO{
+			ID: f.ID, At: f.At.UTC().Format(time.RFC3339Nano),
+			SessionID: f.SessionID, Source: f.Source, Rating: f.Rating, Body: f.Body,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"feedback": out})
