@@ -340,26 +340,34 @@ function LogPanel({ sessionId }: { sessionId: string }) {
   const [text, setText] = useState('');
 
   useEffect(() => {
-    fetch(`/api/sessions/${sessionId}/logs`)
-      .then((resp) => (resp.ok ? resp.json() : { sources: [] }))
-      .then((data: { sources: LogSource[] }) => {
-        setSources(data.sources ?? []);
-        if (data.sources?.length && !data.sources.some((s) => s.name === active)) {
-          setActive(data.sources[0].name);
-        }
+    let alive = true;
+    api
+      .logs(sessionId)
+      .then((data) => {
+        if (!alive) return;
+        const list = data.sources ?? [];
+        setSources(list);
+        if (list.length && !list.some((s) => s.name === active)) setActive(list[0].name);
       })
-      .catch(() => setSources([]));
+      .catch(() => {
+        if (alive) setSources([]);
+      });
+    return () => {
+      alive = false;
+    };
     // active 变化时需要重新取，故依赖里带上它
   }, [sessionId, active]);
 
   useEffect(() => {
     let alive = true;
-    fetch(`/api/sessions/${sessionId}/logs/${active}?tail=200`)
-      .then((resp) => (resp.ok ? resp.text() : ''))
+    api
+      .log(sessionId, active)
       .then((body) => {
         if (alive) setText(body);
       })
-      .catch(() => setText(''));
+      .catch(() => {
+        if (alive) setText('');
+      });
     return () => {
       alive = false;
     };
@@ -438,7 +446,7 @@ function BatchRow({
   const failed = group.events.filter((e) => !e.ok);
   // 一批只放一条录像片段：批内相邻两步可能只隔 0.2 秒，逐行放就成了同一段画面循环十几遍。
   const clipEvent = group.events.find((e) => e.clip);
-  // 一批只贴一张图：就是这一批收尾时交回来的那一帧（run 的最后一步是 wait_and_capture）。
+  // 一批只贴一张图：就是这一批收尾时交回来的那一帧（run 的最后一步必须是 capture）。
   // 批内其他步骤的截图是过程，逐张铺开会把"这批的结论"淹掉。
   const shots = pickKeyShot(group.events);
   const end = Math.max(0, group.events[group.events.length - 1].videoOffsetMs);
@@ -513,14 +521,19 @@ function pickKeyShot(events: SessionEvent[]): SessionEvent[] {
   return [capture ?? shots[shots.length - 1]];
 }
 
-/** 纯等待不产生新画面，记录里并进相邻的动作，不单独占一行 */
+/**
+ * 纯等待不产生新画面，记录里并进相邻的动作，不单独占一行。
+ *
+ * 只认工具名。以前还去 args 里正则猜"这个 eval 其实在 sleep"，那是猜——
+ * 猜错了就把一条真的 eval 藏起来，而记录里不该有读者看不见的步骤。
+ */
 function isSleepStep(e: SessionEvent): boolean {
-  return e.tool === 'sleep' || (e.tool === 'eval' && /new Promise\([^)]*setTimeout/.test(JSON.stringify(e.args ?? '')));
+  return e.tool === 'sleep';
 }
 
 /** 一批的标题：用批里的动作名拼一句话，读者先看这句就够 */
 function summarizeBatch(events: SessionEvent[]): string {
-  const names = events.filter((e) => e.kind !== 'note' && !isSleepStep(e)).map((e) => e.caption.replace(/^点击 /, ''));
+  const names = events.filter((e) => e.kind !== 'note' && !isSleepStep(e)).map((e) => e.caption);
   if (names.length === 0) return '一批操作';
   const head = names.slice(0, 3).join(' → ');
   return names.length > 3 ? `${head} 等 ${names.length} 个动作` : head;

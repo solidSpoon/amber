@@ -148,6 +148,13 @@ async function get<T>(path: string): Promise<T> {
   return (await resp.json()) as T;
 }
 
+/** 取纯文本（日志是文本，不是 JSON） */
+async function getText(path: string): Promise<string> {
+  const resp = await fetch(path);
+  if (!resp.ok) return '';
+  return resp.text();
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const resp = await fetch(path, {
     method: 'POST',
@@ -172,6 +179,8 @@ export const api = {
   machines: () => get<{ machines: Machine[] }>('/api/machines'),
   info: () => get<RuntimeInfo>('/api/info'),
   feedback: () => get<{ feedback: Feedback[] }>('/api/feedback?limit=20'),
+  logs: (id: string) => get<{ sources: LogSource[] }>(`/api/sessions/${id}/logs`),
+  log: (id: string, name: string, tail = 200) => getText(`/api/sessions/${id}/logs/${name}?tail=${tail}`),
 };
 
 /** 机器槽位的显示名：M1 / M2 ……依次类推 */
