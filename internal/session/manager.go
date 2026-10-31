@@ -612,12 +612,17 @@ func (m *Manager) Record(ctx context.Context, id string, step Step, fn func(ctx 
 	if step.Caption == "" {
 		step.Caption = captionFor(step, describe(insp, step))
 	}
-	if sess, err := m.Get(ctx, id); err == nil && sess.Dir != "" {
-		step.Shot = m.captureShot(ctx, sess.Dir, insp, step)
-	}
 	ok := callErr == nil
 	if step.Passed != nil {
 		ok = *step.Passed
+	}
+	// 只给"需要看现场"的步骤配图：失败的、断言的。
+	// 每步都截一张的话，一批 30 步光截图就多花三四秒，而报告里根本不逐行展示它们。
+	wantShot := !ok || step.Kind == "assert" || step.Tool == "screenshot"
+	if wantShot {
+		if sess, err := m.Get(ctx, id); err == nil && sess.Dir != "" {
+			step.Shot = m.captureShot(ctx, sess.Dir, insp, step)
+		}
 	}
 	m.writeEvent(ctx, id, step, msg, artifact, duration.Milliseconds(), ok, offset)
 
