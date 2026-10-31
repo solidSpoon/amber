@@ -273,8 +273,8 @@ func (s *Server) doAssert(ctx context.Context, a assertArgs) error {
 // ---- 批 -------------------------------------------------------------------
 
 const (
-	maxActSteps = 50
-	actTimeout  = 2 * time.Minute
+	maxRunSteps = 50
+	runTimeout  = 2 * time.Minute
 	// 取结束画面之前留的固定余量：动作刚发出去，界面可能还在动画
 	settleDelay = 400 * time.Millisecond
 )
@@ -315,14 +315,14 @@ type stepExtra struct {
 	Image []byte
 }
 
-// actStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
+// runStep 执行一步；返回一句给人看的结果 + 给模型的额外载荷。
 //
 // 动作表刻意正交：一个动作只管一件事，AI 不需要在"该用哪个"上纠结。
 //
 //	snapshot 看状态 / click 点 / hover 悬停 / fill 填输入框
 //	press 按键 / type 打字（这两个作用于当前焦点，页面内外通用）
 //	eval 求值 / wait 等条件 / assert 下结论
-func (s *Server) actStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
+func (s *Server) runStep(ctx context.Context, sid string, st batchStep) (string, stepExtra, error) {
 	base := stepArgs{Intent: st.Intent, Expect: st.Expect}
 	point := clickArgs{SessionID: sid, stepArgs: base, Ref: st.Ref, Match: st.Match, Selector: st.Selector, X: st.X, Y: st.Y}
 
@@ -367,19 +367,19 @@ func (s *Server) actStep(ctx context.Context, sid string, st batchStep) (string,
 	}
 }
 
-// doAct 连续执行若干步；任何一步失败就停下，并把进度说清楚。
+// doRun 连续执行若干步；任何一步失败就停下，并把进度说清楚。
 //
 // 失败不返回 Go error：模型需要知道"跑到第几步、剩下没跑什么"，
 // 用错误把它吞掉反而更糊涂。会话本身的状态在报告里，不靠这里的返回值。
-func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error) {
+func (s *Server) doRun(ctx context.Context, a runArgs) (string, runResult, error) {
 	if len(a.Steps) == 0 {
-		return "", actResult{}, errors.New("steps 不能为空")
+		return "", runResult{}, errors.New("steps 不能为空")
 	}
-	if len(a.Steps) > maxActSteps {
-		return "", actResult{}, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxActSteps, len(a.Steps))
+	if len(a.Steps) > maxRunSteps {
+		return "", runResult{}, fmt.Errorf("一次最多 %d 步（收到 %d 步）", maxRunSteps, len(a.Steps))
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
 	// 这一批从哪到哪：切片按这段算，不按单步。
@@ -390,13 +390,13 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 	}
 
 	var b strings.Builder
-	res := actResult{Steps: make([]actStepResult, 0, len(a.Steps))}
+	res := runResult{Steps: make([]runStepResult, 0, len(a.Steps))}
 	for i, st := range a.Steps {
-		msg, extra, err := s.actStep(ctx, a.SessionID, st)
+		msg, extra, err := s.runStep(ctx, a.SessionID, st)
 		if err != nil {
 			fmt.Fprintf(&b, "%d. %s ✗ %v\n", i+1, st.Action, err)
 			fmt.Fprintf(&b, "已停止：后面 %d 步没有执行。", len(a.Steps)-i-1)
-			res.Steps = append(res.Steps, actStepResult{
+			res.Steps = append(res.Steps, runStepResult{
 				Index: i + 1, Action: st.Action, OK: false, Text: err.Error(), Elements: extra.Elements, Value: extra.Value,
 			})
 			res.StoppedAt = i + 1
@@ -410,7 +410,7 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 			b.WriteString(extra.Text)
 			b.WriteString("\n")
 		}
-		res.Steps = append(res.Steps, actStepResult{
+		res.Steps = append(res.Steps, runStepResult{
 			Index: i + 1, Action: st.Action, OK: true, Text: msg, Elements: extra.Elements, Value: extra.Value, Image: extra.Image,
 		})
 	}
@@ -435,7 +435,7 @@ func (s *Server) doAct(ctx context.Context, a actArgs) (string, actResult, error
 //
 // 不做的话，模型跑完一批还得再调一次 snapshot 才知道结果——又是一次往返，
 // 正好把批的意义抵消掉。这里不记步骤：它不是这次操作的一部分，是把结果给模型看。
-func (s *Server) attachCurrent(ctx context.Context, sid string, steps []batchStep, b *strings.Builder, res *actResult) {
+func (s *Server) attachCurrent(ctx context.Context, sid string, steps []batchStep, b *strings.Builder, res *runResult) {
 	insp, err := s.manager.Inspector(ctx, sid)
 	if err != nil {
 		return

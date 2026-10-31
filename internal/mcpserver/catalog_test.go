@@ -57,7 +57,7 @@ func TestCatalogMatchesRegisteredTools(t *testing.T) {
 	// 工具面就这些：开、跑、看一眼、收、对工作流本身的反馈。
 	// 具体动作（点击、悬停、等待…）都走 run 的 steps，不再各占一个工具。
 	want := []string{
-		"act", "end_session", "feedback", "list_sessions", "snapshot", "start_session",
+		"end_session", "feedback", "list_sessions", "run", "snapshot", "start_session",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("工具数量 = %d，期望 %d：%v", len(got), len(want), got)
