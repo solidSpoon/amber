@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,7 +46,7 @@ func NewServer(mgr *session.Manager, st *store.Store, cfg *config.Config, log *s
 		Title:       "Amber",
 		Description: "一台给 AI 用的一次性 GUI 机器：起容器、驱动应用、全程录屏、留下可回看的记录",
 		Version:     "0.1.0",
-	}, nil)
+	}, &mcp.ServerOptions{Instructions: instructions()})
 
 	registerSessionTools(server, s)
 	registerCaptureTool(server, s)
@@ -52,6 +54,35 @@ func NewServer(mgr *session.Manager, st *store.Store, cfg *config.Config, log *s
 	registerFeedbackTool(server, s)
 
 	return server
+}
+
+// instructions 是服务级说明（InitializeResult.instructions）。
+//
+// 工具描述只讲"这一步怎么调"，讲不了"这套东西整体怎么用"：先说清流程，
+// 再说清收尾之后还有什么能用——否则模型跑完就收尾，不会想到母片和时间线。
+//
+// 注意：不是所有客户端都会把这段话交给模型（有的只显示工具清单），
+// 所以关键信息在 amber_stop 的返回值里也重复出现了一次。
+func instructions() string {
+	return "Amber 给你一台一次性的图形界面机器（容器里的虚拟屏），你在上面像人一样操作应用，" +
+		"每一步都会进记录：做了什么、结果如何、当时屏幕什么样。\n" +
+		"\n" +
+		"典型流程：amber_start（给 payload 和 title）→ amber_run / amber_capture（一次跑一串动作，最后一步必须是 capture）" +
+		"→ amber_stop（收尾）。会话之间互不影响，同一台机器可以起多次。\n" +
+		"\n" +
+		"操作要点：\n" +
+		"  - 动作写在 amber_run 的 steps 里（click/hover/fill/press/type/eval/wait/sleep），" +
+		"一串动作中间不回到你这边，所以有时效性要求的连招靠它（拖到第 6 秒立刻悬停）。\n" +
+		"  - 用 ref 点元素前先 capture 拿引用号；页面刚变、引用号还没拿到时，用 match（可见文字）或 selector 也行。\n" +
+		"  - 每批要写 intent：记录里它就是这一段的标题。\n" +
+		"\n" +
+		"收尾之后还能深挖（同一台机器上直接读）：\n" +
+		"  - archive/session.mp4：整场录像（永久保留，可 seek）。想重新看某两秒，" +
+		"用 ffmpeg -ss <秒> -t <秒> 取帧或切片，比让人再看一遍快。\n" +
+		"  - archive/timeline.json：每一步的墙钟时间、相对录像起点的 offsetMs、caption、结果、对应截图与片段。" +
+		"offsetMs 直接喂 ffmpeg -ss。\n" +
+		"  - clips/：每一批那几秒的片段（记录页看的就是它）。\n" +
+		"  - amber_stop 的返回值里带着这些路径。"
 }
 
 // ---- 会话管理 -------------------------------------------------------------
@@ -125,9 +156,22 @@ func registerSessionTools(server *mcp.Server, s *Server) {
 			Status:     string(sess.Status),
 			ReportURL:  fmt.Sprintf("/#/sessions/%s", sess.ID),
 			DurationMS: sess.VideoDurationMS,
+			ArchiveDir: filepath.Join(sess.Dir, "archive"),
 		}
-		return text(fmt.Sprintf("会话已收尾：%s（%s，录像 %.1fs）。记录：%s",
-			sess.ID, sess.Status, float64(sess.VideoDurationMS)/1000, out.ReportURL)), out, nil
+		if info, err := os.Stat(out.ArchiveDir); err == nil && info.IsDir() {
+			out.VideoPath = filepath.Join(out.ArchiveDir, "session.mp4")
+			if _, err := os.Stat(out.VideoPath); err != nil {
+				out.VideoPath = ""
+			}
+			out.TimelinePath = filepath.Join(out.ArchiveDir, "timeline.json")
+		}
+		// 收尾这一步是"事后还能做什么"唯一的提示位：模型看完这段就知道母片在哪
+		detail := ""
+		if out.VideoPath != "" {
+			detail = fmt.Sprintf("\n整场录像：%s\n时间线（每步的相对毫秒）：%s", out.VideoPath, out.TimelinePath)
+		}
+		return text(fmt.Sprintf("会话已收尾：%s（%s，录像 %.1fs）。记录：%s%s",
+			sess.ID, sess.Status, float64(sess.VideoDurationMS)/1000, out.ReportURL, detail)), out, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -166,6 +210,12 @@ type endResult struct {
 	// ReportURL 记录（步骤 + 每批画面），提 PR 时贴这个
 	ReportURL  string `json:"reportUrl"`
 	DurationMS int64  `json:"durationMs"`
+	// ArchiveDir 归档目录：母片与时间线都在里面（清空存储后可能没了）
+	ArchiveDir string `json:"archiveDir,omitempty"`
+	// VideoPath 整场录像，可 seek：事后重新取帧、核对时序都靠它
+	VideoPath string `json:"videoPath,omitempty"`
+	// TimelinePath 每一步的时间戳清单（JSON），offsetMs 可直接喂 ffmpeg -ss
+	TimelinePath string `json:"timelinePath,omitempty"`
 }
 
 type listResult struct {

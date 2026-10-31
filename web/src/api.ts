@@ -119,6 +119,33 @@ export interface RuntimeInfo {
   idleTimeout: string;
 }
 
+/** 存储页的一行：一个会话占了多少画面 */
+export interface StorageSession {
+  id: string;
+  title?: string;
+  endedAt?: string;
+  /** 还在跑：清空画面时会跳过 */
+  running: boolean;
+  videoBytes: number;
+  clipBytes: number;
+  shotBytes: number;
+  totalBytes: number;
+}
+
+/** 存储页：磁盘上被画面占掉的部分 */
+export interface StorageUsage {
+  sessions: StorageSession[];
+  totals: { sessions: number; videoBytes: number; clipBytes: number; shotBytes: number; totalBytes: number };
+  /** 产物库（内容寻址存储），按保留期自动回收，不在清空范围内 */
+  blobs: { count: number; bytes: number };
+}
+
+export interface PurgeResult {
+  freedBytes: number;
+  sessions: number;
+  skipped: number;
+}
+
 /** AI 用完工作流后留下的意见（产品改进输入，不属于验收证据） */
 export interface Feedback {
   id: number;
@@ -178,6 +205,8 @@ export const api = {
   machines: () => get<{ machines: Machine[] }>('/api/machines'),
   info: () => get<RuntimeInfo>('/api/info'),
   feedback: () => get<{ feedback: Feedback[] }>('/api/feedback?limit=20'),
+  storage: () => get<StorageUsage>('/api/storage'),
+  purgeMedia: () => post<PurgeResult>('/api/storage/purge', {}),
   logs: (id: string) => get<{ sources: LogSource[] }>(`/api/sessions/${id}/logs`),
   log: (id: string, name: string, tail = 200) => getText(`/api/sessions/${id}/logs/${name}?tail=${tail}`),
 };

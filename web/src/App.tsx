@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import { BookOpenIcon, ListChecksIcon, MessageSquareTextIcon, MonitorPlayIcon, PlugIcon } from 'lucide-react';
+import {
+  BookOpenIcon,
+  HardDriveIcon,
+  ListChecksIcon,
+  MessageSquareTextIcon,
+  MonitorPlayIcon,
+  PlugIcon,
+} from 'lucide-react';
 import { Toaster } from '@/components/ui/sonner';
 import { cn } from '@/lib/utils';
 import Dashboard from './pages/Dashboard';
@@ -7,6 +14,7 @@ import FeedbackPage from './pages/Feedback';
 import Mcp from './pages/Mcp';
 import ProductDoc from './pages/ProductDoc';
 import Sessions from './pages/Sessions';
+import Storage from './pages/Storage';
 import SessionDetail from './pages/SessionDetail';
 
 // 用 hash 路由而不是 react-router：页面只有三个，且部署在单文件二进制里，
@@ -17,6 +25,7 @@ type Route =
   | { name: 'session'; id: string }
   | { name: 'feedback' }
   | { name: 'mcp' }
+  | { name: 'storage' }
   | { name: 'docs' };
 
 function parseRoute(hash: string): Route {
@@ -25,6 +34,7 @@ function parseRoute(hash: string): Route {
   if (clean === 'sessions') return { name: 'sessions' };
   if (clean === 'feedback') return { name: 'feedback' };
   if (clean === 'mcp') return { name: 'mcp' };
+  if (clean === 'storage') return { name: 'storage' };
   if (clean === 'docs') return { name: 'docs' };
   return { name: 'dashboard' };
 }
@@ -34,6 +44,7 @@ const NAV = [
   { href: '#/sessions', label: '会话', key: 'sessions', icon: ListChecksIcon },
   { href: '#/feedback', label: '反馈', key: 'feedback', icon: MessageSquareTextIcon },
   { href: '#/mcp', label: 'MCP 接入', key: 'mcp', icon: PlugIcon },
+  { href: '#/storage', label: '存储', key: 'storage', icon: HardDriveIcon },
   // 产品文档排在最后：它是"依据"，不是日常操作入口
   { href: '#/docs', label: '产品文档', key: 'docs', icon: BookOpenIcon },
 ] as const;
@@ -113,6 +124,7 @@ export default function App() {
         {route.name === 'session' && <SessionDetail id={route.id} />}
         {route.name === 'feedback' && <FeedbackPage />}
         {route.name === 'mcp' && <Mcp />}
+        {route.name === 'storage' && <Storage />}
         {route.name === 'docs' && <ProductDoc />}
       </main>
 

@@ -149,6 +149,22 @@ type Event struct {
 	BatchIntent string
 }
 
+// ClearMediaRefs 抹掉所有事件对媒体文件的引用。
+//
+// 存储页"清空画面"之后调：文件已经删了，DB 里还指着它们的话，记录页会挂一排打不开的图。
+// 步骤本身（做了什么、结果、时间戳）一个字不动——清掉的是画面，不是记录。
+func (s *Store) ClearMediaRefs(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE events SET shot = '', artifact_path = '' WHERE shot <> '' OR artifact_path <> ''`)
+	if err != nil {
+		return 0, fmt.Errorf("清理画面引用失败: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return n, nil
+}
+
 // Sample 一次系统指标采样。
 type Sample struct {
 	At         time.Time

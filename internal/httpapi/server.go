@@ -127,6 +127,8 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/docs/product", s.productDoc)
 		api.Get("/feedback", s.listFeedback)
 		api.Get("/system/metrics", s.systemMetrics)
+		api.Get("/storage", s.storageUsage)
+		api.Post("/storage/purge", s.purgeStorage)
 	})
 
 	r.NotFound(s.serveSPA)
@@ -509,6 +511,29 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// storageUsage 存储页：每个会话占了多少、合计多少。
+func (s *Server) storageUsage(w http.ResponseWriter, r *http.Request) {
+	usage, err := s.manager.Storage(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, usage)
+}
+
+// purgeStorage 整体清空画面（母片、片段、截图），记录与时间戳保留。
+//
+// 只有一个"全清"动作，没有逐条删除：记录还在、画面没了，读者会更糊涂；
+// 要收就整批收走，这也是唯一能让磁盘数字真的降下来的操作。
+func (s *Server) purgeStorage(w http.ResponseWriter, r *http.Request) {
+	result, err := s.manager.PurgeMedia(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // info 运行时信息：虚拟屏几何、并发上限等，看板据此画出与真实分辨率同比例的"显示器"。

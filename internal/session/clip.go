@@ -2,10 +2,12 @@ package session
 
 // clip.go：录像片段——记录里"这一段的画面"从哪来。
 //
-// 整场录像不留（见 finalize）：收尾时把每一批那几秒切出来，然后把母片删掉。
-// 所以这里的顺序是有意义的：
+// 两种画面，用途不同：
 //
-//	cutClips（收尾，母片还在）→ 删母片 → Clip/ClipReady 只命中缓存
+//	母片  archive/session.mp4  整场录像，永久留着。它是原始现场：AI 事后要重新取帧、
+//	                           核对某一秒到底发生了什么，只有它能回答。页面不放它（没人
+//	                           从头看一遍），但存储页能看到它占多少、可以整体清空。
+//	片段  clips/batch-*.mp4    每一批那几秒，收尾时从母片切好。记录里就看这个：小、秒开。
 //
 // 切片单位是"一段连续操作"（一次 run 调用），不是单步：一批里的相邻两步
 // 可能只隔 0.2 秒，每步各切前后 2 秒会把同一段画面重复十几遍。
@@ -58,27 +60,36 @@ func clipWindow(target store.Event) (startMS, lengthMS int64) {
 	return start, 4000
 }
 
-// masterVideo 整场录像（母片）的路径。收尾时它会被删掉，只剩片段。
+// masterVideo 整场录像（母片）的路径。
 //
-// 位置由容器启动脚本约定（RIG_OUT=/out），不再存进库里：
-// 同一个事实存两份，早晚会有新会话写出一个对不上的路径。
+// 容器录在 video/ 下（RIG_OUT=/out 的约定）；收尾时整个搬到 archive/，
+// 那里是"归档区"，存储页按它统计、清空也清它。会话还在跑时读 video/。
 func masterVideo(sess store.Session) string {
+	if info, err := os.Stat(archiveVideo(sess)); err == nil && info.Size() > 0 {
+		return archiveVideo(sess)
+	}
 	return filepath.Join(sess.Dir, "video", "session.mp4")
+}
+
+// archiveVideo 归档后的母片位置。
+func archiveVideo(sess store.Session) string {
+	return filepath.Join(sess.Dir, "archive", "session.mp4")
+}
+
+// timelinePath 收尾导出的"带时间戳的步骤清单"。
+func timelinePath(sess store.Session) string {
+	return filepath.Join(sess.Dir, "archive", "timeline.json")
 }
 
 // clipPath 这一步的片段落在哪：同一批共用一个文件，按批起点命名。
 func clipPath(sess store.Session, target store.Event) string {
-	key := target.VideoOffsetMS
-	if target.BatchStartMS >= 0 {
-		key = target.BatchStartMS
-	}
-	return filepath.Join(sess.Dir, clipName(key))
+	return filepath.Join(sess.Dir, clipName(clipKey(target)))
 }
 
 // Clip 返回某一步所在那一段的短视频路径（没有缓存就现切）。
 //
-// 收尾之后母片已经删了（见 cutClips），所以正常路径是「直接命中缓存」；
-// 这里的现切只服务会话还在跑、或老会话母片还在的情况。
+// 正常路径是「直接命中缓存」：收尾时已经切好。现切服务两种情况——
+// 会话还在跑（文档里点开某一步），或者存储页把片段清空了但母片还在。
 func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) {
 	sess, err := m.Get(ctx, id)
 	if err != nil {
@@ -115,7 +126,7 @@ func (m *Manager) Clip(ctx context.Context, id string, seq int) (string, error) 
 
 // ClipReady 这一步的画面能不能给：已经切好的片段在，或者母片还在（可以现切）。
 //
-// 收尾会删掉母片，所以判断不能只看母片在不在——老会话的片段依然要能播。
+// 两者都要看：片段被清掉了但母片还在时，点开还能现切一段；都清掉了才真的没有。
 func (m *Manager) ClipReady(sess store.Session, target store.Event) bool {
 	if target.VideoOffsetMS < 0 || !HasVisual(target.Tool) {
 		return false

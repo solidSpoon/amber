@@ -517,19 +517,28 @@ func (m *Manager) finalize(ctx context.Context, sess store.Session, note string)
 		if meta, err := readVideoMeta(filepath.Join(sess.Dir, "video", "session.json")); err == nil {
 			sess.VideoDurationMS = meta.DurationMS
 		}
-		// 整场录像本身不留：没人会从头看一遍，而它又大又慢。
-		// 记录里真正被引用的是每一批那几秒画面，所以先把片段切好，再把母片删掉。
+		// 先切片段，记录里"这一段的画面"靠它们（小、秒开）。
 		if n, err := m.cutClips(ctx, sess); err != nil {
 			m.log.Warn("切片段失败，部分步骤将没有画面", "session", sess.ID, "err", err)
 		} else {
 			m.log.Info("片段已归档", "session", sess.ID, "clips", n)
 		}
-		if err := os.Remove(videoPath); err != nil {
-			m.log.Warn("删除整场录像失败", "session", sess.ID, "err", err)
+		// 母片搬到归档区而不是删掉：它是原始现场，AI 事后重新取帧、核对时序都靠它。
+		// 页面不放它，"存储"页能看到它占多少，也可以整体清空。
+		if err := os.MkdirAll(filepath.Dir(archiveVideo(sess)), 0o755); err != nil {
+			m.log.Warn("创建归档目录失败", "session", sess.ID, "err", err)
+		} else if err := os.Rename(videoPath, archiveVideo(sess)); err != nil {
+			m.log.Warn("归档整场录像失败", "session", sess.ID, "err", err)
+		} else {
+			m.log.Info("整场录像已归档", "session", sess.ID, "path", filepath.Join("archive", "session.mp4"))
 		}
 	}
 	if err := m.store.UpdateSession(ctx, sess); err != nil {
 		return sess, err
+	}
+	// 时间线：把事件表投影成一份机器可读的文件，和母片放在一起
+	if err := m.writeTimeline(ctx, sess); err != nil {
+		m.log.Warn("导出时间线失败", "session", sess.ID, "err", err)
 	}
 	m.log.Info("会话收尾完成", "session", sess.ID, "duration_ms", sess.VideoDurationMS)
 	return sess, nil
