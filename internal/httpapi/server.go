@@ -98,7 +98,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "sessions": len(s.activeIDs())})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "sessions": s.activeSessionCount()})
 	})
 
 	r.Route("/api", func(api chi.Router) {
@@ -214,6 +214,15 @@ func toSessionDTO(s store.Session) sessionDTO {
 	return dto
 }
 
+// toSessionDTOs 把一次会话列表整体转成 DTO：列表接口和 SSE 推的是同一份形状。
+func toSessionDTOs(sessions []store.Session) []sessionDTO {
+	out := make([]sessionDTO, 0, len(sessions))
+	for _, sess := range sessions {
+		out = append(out, toSessionDTO(sess))
+	}
+	return out
+}
+
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -226,11 +235,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	out := make([]sessionDTO, 0, len(sessions))
-	for _, sess := range sessions {
-		out = append(out, toSessionDTO(sess))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": toSessionDTOs(sessions)})
 }
 
 type createRequest struct {
@@ -366,7 +371,6 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
 }
 
-// serveClip 某一步所在那一批的短片（收尾时已切好，直接命中缓存）。
 // listFeedback 最近的 AI 建议（给控制台看，也是为了后续集中分析）。
 func (s *Server) listFeedback(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -398,6 +402,7 @@ func (s *Server) productDoc(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, docs.Product)
 }
 
+// serveClip 某一步所在那一批的短片（收尾时已切好，直接命中缓存）。
 func (s *Server) serveClip(w http.ResponseWriter, r *http.Request) {
 	seq, err := strconv.Atoi(chi.URLParam(r, "seq"))
 	if err != nil {
@@ -447,11 +452,7 @@ func (s *Server) streamSessions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return map[string]any{"error": err.Error()}
 		}
-		out := make([]sessionDTO, 0, len(sessions))
-		for _, sess := range sessions {
-			out = append(out, toSessionDTO(sess))
-		}
-		return map[string]any{"sessions": out}
+		return map[string]any{"sessions": toSessionDTOs(sessions)}
 	})
 }
 
@@ -465,13 +466,8 @@ type sampleDTO struct {
 	Containers int     `json:"containers"`
 }
 
-func (s *Server) systemMetrics(w http.ResponseWriter, r *http.Request) {
-	limit := 120
-	samples, err := s.store.RecentSamples(r.Context(), limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+// toSampleDTOs 把采样整体转成 DTO：一次性接口和 SSE 推的是同一份形状。
+func toSampleDTOs(samples []store.Sample) []sampleDTO {
 	out := make([]sampleDTO, 0, len(samples))
 	for _, m := range samples {
 		out = append(out, sampleDTO{
@@ -480,7 +476,16 @@ func (s *Server) systemMetrics(w http.ResponseWriter, r *http.Request) {
 			DiskUsed: m.DiskUsed, DiskTotal: m.DiskTotal, Containers: m.Containers,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"samples": out})
+	return out
+}
+
+func (s *Server) systemMetrics(w http.ResponseWriter, r *http.Request) {
+	samples, err := s.store.RecentSamples(r.Context(), 120)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"samples": toSampleDTOs(samples)})
 }
 
 func (s *Server) streamSystem(w http.ResponseWriter, r *http.Request) {
@@ -489,15 +494,7 @@ func (s *Server) streamSystem(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return map[string]any{"error": err.Error()}
 		}
-		out := make([]sampleDTO, 0, len(samples))
-		for _, m := range samples {
-			out = append(out, sampleDTO{
-				At: m.At.UTC().Format(time.RFC3339), CPUPct: m.CPUPct,
-				MemUsed: m.MemUsed, MemTotal: m.MemTotal,
-				DiskUsed: m.DiskUsed, DiskTotal: m.DiskTotal, Containers: m.Containers,
-			})
-		}
-		return map[string]any{"samples": out}
+		return map[string]any{"samples": toSampleDTOs(samples)}
 	})
 }
 
@@ -542,19 +539,15 @@ func (s *Server) streamSnapshot(w http.ResponseWriter, r *http.Request, payload 
 	}
 }
 
-// activeIDs 仅用于 readyz 的粗略展示。
-func (s *Server) activeIDs() []string {
+// activeSessionCount 给 readyz 用：只数个数，不必把会话整行读出来。
+func (s *Server) activeSessionCount() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	sessions, err := s.store.ActiveSessions(ctx)
+	n, err := s.store.ActiveSessionCount(ctx)
 	if err != nil {
-		return nil
+		return 0
 	}
-	ids := make([]string, 0, len(sessions))
-	for _, sess := range sessions {
-		ids = append(ids, sess.ID)
-	}
-	return ids
+	return n
 }
 
 // serveSPA 把非 API 路径交给前端路由（单页应用刷新不会 404）。

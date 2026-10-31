@@ -45,13 +45,30 @@ const (
 	StatusAbandoned Status = "abandoned"
 )
 
+// terminalStatuses 是"这次会话已经结束"的全部状态。
+//
+// SQL 里的过滤和 Status.Terminal() 都从这里取：两边各写一份，加了新终态之后
+// 必然有一边漏掉，表现为"看板上一直占着机器、回收器却再也不管它"。
+var terminalStatuses = []Status{StatusFinished, StatusFailed, StatusAbandoned}
+
 // Terminal 判断状态是否已经结束（不再需要调度器照看）。
 func (s Status) Terminal() bool {
-	switch s {
-	case StatusFinished, StatusFailed, StatusAbandoned:
-		return true
+	for _, t := range terminalStatuses {
+		if s == t {
+			return true
+		}
 	}
 	return false
+}
+
+// notTerminalFilter 拼出"还没结束"的 SQL 条件与参数。
+func notTerminalFilter(column string) (string, []any) {
+	args := make([]any, 0, len(terminalStatuses))
+	for _, status := range terminalStatuses {
+		args = append(args, string(status))
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(terminalStatuses)), ", ")
+	return column + " NOT IN (" + placeholders + ")", args
 }
 
 // Rect 画面几何（像素）。X/Y 是左上角在虚拟屏里的位置，Width/Height 是有内容的尺寸。
@@ -264,6 +281,23 @@ func formatTime(t time.Time) any {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
+// rowScanner 是 *sql.Rows 和 *sql.Row 共有的能力，scanSession 这类函数只依赖它。
+type rowScanner interface{ Scan(...any) error }
+
+// scanAll 把结果集逐行扫成切片；每行的解析逻辑由调用方给。
+func scanAll[T any](rows *sql.Rows, scan func(rowScanner) (T, error)) ([]T, error) {
+	defer rows.Close()
+	out := make([]T, 0, 16)
+	for rows.Next() {
+		item, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func parseTime(v sql.NullString) time.Time {
 	if !v.Valid || v.String == "" {
 		return time.Time{}
@@ -327,7 +361,7 @@ const sessionColumns = `id, title, app, ref, image, container, status, cdp_port,
 	frame_x, frame_y, frame_w, frame_h, display_w, display_h,
 	created_at, started_at, ended_at, idle_deadline, video_duration_ms, verdict, summary, error`
 
-func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
+func scanSession(sc rowScanner) (Session, error) {
 	var (
 		sess                             Session
 		status                           string
@@ -379,17 +413,11 @@ func (s *Store) ListSessions(ctx context.Context, limit int) ([]Session, error) 
 	if err != nil {
 		return nil, fmt.Errorf("列出会话失败: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]Session, 0, 16)
-	for rows.Next() {
-		sess, err := scanSession(rows)
-		if err != nil {
-			return nil, fmt.Errorf("扫描会话失败: %w", err)
-		}
-		out = append(out, sess)
+	sessions, err := scanAll(rows, scanSession)
+	if err != nil {
+		return nil, fmt.Errorf("扫描会话失败: %w", err)
 	}
-	return out, rows.Err()
+	return sessions, nil
 }
 
 // AppendEvent 追加一条审计事件，并返回分配到的序号。
@@ -458,31 +486,33 @@ func (s *Store) ListEvents(ctx context.Context, sessionID string) ([]Event, erro
 	if err != nil {
 		return nil, fmt.Errorf("查询事件失败: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]Event, 0, 32)
-	for rows.Next() {
-		var (
-			e    Event
-			at   string
-			args string
-			ok   int
-		)
-		if err := rows.Scan(&e.ID, &e.SessionID, &e.Seq, &at, &e.Tool, &args, &ok,
-			&e.Kind, &e.Caption, &e.Intent, &e.Expect,
-			&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath, &e.Shot,
-			&e.Frame.X, &e.Frame.Y, &e.Frame.Width, &e.Frame.Height,
-			&e.BatchStartMS, &e.BatchEndMS, &e.BatchIntent); err != nil {
-			return nil, fmt.Errorf("扫描事件失败: %w", err)
-		}
-		e.Args = json.RawMessage(args)
-		e.OK = ok == 1
-		if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
-			e.At = t
-		}
-		out = append(out, e)
+	events, err := scanAll(rows, scanEvent)
+	if err != nil {
+		return nil, fmt.Errorf("扫描事件失败: %w", err)
 	}
-	return out, rows.Err()
+	return events, nil
+}
+
+func scanEvent(sc rowScanner) (Event, error) {
+	var (
+		e    Event
+		at   string
+		args string
+		ok   int
+	)
+	if err := sc.Scan(&e.ID, &e.SessionID, &e.Seq, &at, &e.Tool, &args, &ok,
+		&e.Kind, &e.Caption, &e.Intent, &e.Expect,
+		&e.DurationMS, &e.VideoOffsetMS, &e.Result, &e.ArtifactPath, &e.Shot,
+		&e.Frame.X, &e.Frame.Y, &e.Frame.Width, &e.Frame.Height,
+		&e.BatchStartMS, &e.BatchEndMS, &e.BatchIntent); err != nil {
+		return Event{}, err
+	}
+	e.Args = json.RawMessage(args)
+	e.OK = ok == 1
+	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		e.At = t
+	}
+	return e, nil
 }
 
 // InsertSample 写入一条指标采样。
@@ -507,33 +537,35 @@ func (s *Store) RecentSamples(ctx context.Context, limit int) ([]Sample, error) 
 	if err != nil {
 		return nil, fmt.Errorf("查询指标失败: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]Sample, 0, limit)
-	for rows.Next() {
-		var (
-			m  Sample
-			at string
-		)
-		if err := rows.Scan(&at, &m.CPUPct, &m.MemUsed, &m.MemTotal, &m.DiskUsed, &m.DiskTotal, &m.Containers); err != nil {
-			return nil, fmt.Errorf("扫描指标失败: %w", err)
-		}
-		if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
-			m.At = t
-		}
-		out = append(out, m)
+	samples, err := scanAll(rows, scanSample)
+	if err != nil {
+		return nil, fmt.Errorf("扫描指标失败: %w", err)
 	}
 	// 倒序取最近 N 条后再翻转，返回升序
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
+	for i, j := 0, len(samples)-1; i < j; i, j = i+1, j-1 {
+		samples[i], samples[j] = samples[j], samples[i]
 	}
-	return out, rows.Err()
+	return samples, nil
+}
+
+func scanSample(sc rowScanner) (Sample, error) {
+	var (
+		m  Sample
+		at string
+	)
+	if err := sc.Scan(&at, &m.CPUPct, &m.MemUsed, &m.MemTotal, &m.DiskUsed, &m.DiskTotal, &m.Containers); err != nil {
+		return Sample{}, err
+	}
+	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		m.At = t
+	}
+	return m, nil
 }
 
 // UsedSlots 返回当前被非终态会话占用的槽位集合。
 func (s *Store) UsedSlots(ctx context.Context) (map[int]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT slot, id FROM sessions
-		WHERE status NOT IN (?, ?, ?)`, string(StatusFinished), string(StatusFailed), string(StatusAbandoned))
+	where, args := notTerminalFilter("status")
+	rows, err := s.db.QueryContext(ctx, `SELECT slot, id FROM sessions WHERE `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询槽位占用失败: %w", err)
 	}
@@ -553,22 +585,26 @@ func (s *Store) UsedSlots(ctx context.Context) (map[int]string, error) {
 	return used, rows.Err()
 }
 
+// ActiveSessionCount 只数还没结束的会话（readyz 这类"看一眼状态"的调用用它）。
+func (s *Store) ActiveSessionCount(ctx context.Context) (int, error) {
+	where, args := notTerminalFilter("status")
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM sessions WHERE `+where, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("统计活跃会话失败: %w", err)
+	}
+	return n, nil
+}
+
 // ActiveSessions 返回所有非终态会话，供调度器做超时回收。
 func (s *Store) ActiveSessions(ctx context.Context) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+sessionColumns+` FROM sessions
-		WHERE status NOT IN (?, ?, ?) ORDER BY created_at`, string(StatusFinished), string(StatusFailed), string(StatusAbandoned))
+	where, args := notTerminalFilter("status")
+	rows, err := s.db.QueryContext(ctx, `SELECT `+sessionColumns+` FROM sessions WHERE `+where+` ORDER BY created_at`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询活跃会话失败: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]Session, 0, 4)
-	for rows.Next() {
-		sess, err := scanSession(rows)
-		if err != nil {
-			return nil, fmt.Errorf("扫描会话失败: %w", err)
-		}
-		out = append(out, sess)
+	sessions, err := scanAll(rows, scanSession)
+	if err != nil {
+		return nil, fmt.Errorf("扫描会话失败: %w", err)
 	}
-	return out, rows.Err()
+	return sessions, nil
 }
