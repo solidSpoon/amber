@@ -6,12 +6,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -25,31 +25,53 @@ type logSource struct {
 	Bytes int64  `json:"bytes"`
 }
 
-// resolveLogPath 把来源名解析成具体文件；返回 ok=false 表示该来源当前没有日志。
+// logSources 是"这个会话有哪些日志可看"的唯一清单：顺序就是页面上的顺序
+// （最常看的容器输出在最前）。列表、取文件都从这里查，不再各写一份 name。
 //
-// 只允许白名单来源，路径全部由服务端拼，不接受客户端传任意路径。
-func resolveLogPath(sessionDir, name string) (string, bool) {
-	switch name {
-	case "container":
-		return existing(filepath.Join(sessionDir, "logs", "container.log"))
-	case "ffmpeg":
-		return existing(filepath.Join(sessionDir, "logs", "ffmpeg.log"))
-	case "xvfb":
-		return existing(filepath.Join(sessionDir, "logs", "xvfb.log"))
-	case "openbox":
-		return existing(filepath.Join(sessionDir, "logs", "openbox.log"))
-	case "app":
-		// 应用自身日志：开发态落在 userData/logs-dev，正式态在 logs
-		for _, dir := range []string{
-			filepath.Join(sessionDir, "userdata", "logs-dev"),
-			filepath.Join(sessionDir, "userdata", "logs"),
-		} {
-			// 应用日志是 jsonl（main-YYYY-MM-DD.jsonl），别的模块可能写 .log，两种都认
-			for _, suffix := range []string{".jsonl", ".log"} {
-				if newest, ok := newestFile(dir, suffix); ok {
-					return newest, true
-				}
+// 路径全部由服务端拼，不接受客户端传路径。
+var logSources = []struct {
+	name  string
+	label string
+	find  func(sessionDir string) (string, bool)
+}{
+	{"container", "容器输出", func(dir string) (string, bool) {
+		return existing(filepath.Join(dir, "logs", "container.log"))
+	}},
+	{"app", "应用日志", findAppLog},
+	{"ffmpeg", "录屏", func(dir string) (string, bool) {
+		return existing(filepath.Join(dir, "logs", "ffmpeg.log"))
+	}},
+	{"xvfb", "虚拟屏", func(dir string) (string, bool) {
+		return existing(filepath.Join(dir, "logs", "xvfb.log"))
+	}},
+	{"openbox", "窗口管理器", func(dir string) (string, bool) {
+		return existing(filepath.Join(dir, "logs", "openbox.log"))
+	}},
+}
+
+// findAppLog 找应用自身的最新日志。
+//
+// 开发态落在 userdata/logs-dev，正式态在 userdata/logs；应用日志是 jsonl
+// （main-YYYY-MM-DD.jsonl），别的模块可能写 .log，两种都认。
+func findAppLog(sessionDir string) (string, bool) {
+	for _, dir := range []string{
+		filepath.Join(sessionDir, "userdata", "logs-dev"),
+		filepath.Join(sessionDir, "userdata", "logs"),
+	} {
+		for _, suffix := range []string{".jsonl", ".log"} {
+			if newest, ok := newestFile(dir, suffix); ok {
+				return newest, true
 			}
+		}
+	}
+	return "", false
+}
+
+// resolveLogPath 把来源名解析成具体文件；ok=false 表示该来源当前没有日志。
+func resolveLogPath(sessionDir, name string) (string, bool) {
+	for _, src := range logSources {
+		if src.name == name {
+			return src.find(sessionDir)
 		}
 	}
 	return "", false
@@ -87,14 +109,6 @@ func newestFile(dir, suffix string) (string, bool) {
 	return best, best != ""
 }
 
-var logCatalog = []struct{ name, label string }{
-	{"container", "容器输出"},
-	{"app", "应用日志"},
-	{"ffmpeg", "录屏"},
-	{"xvfb", "虚拟屏"},
-	{"openbox", "窗口管理器"},
-}
-
 // listLogs 返回该会话有哪些日志可看。
 func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 	sess, err := s.manager.Get(r.Context(), chi.URLParam(r, "id"))
@@ -102,9 +116,9 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	sources := make([]logSource, 0, len(logCatalog))
-	for _, item := range logCatalog {
-		path, ok := resolveLogPath(sess.Dir, item.name)
+	sources := make([]logSource, 0, len(logSources))
+	for _, item := range logSources {
+		path, ok := item.find(sess.Dir)
 		if !ok {
 			continue
 		}
@@ -114,7 +128,6 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		sources = append(sources, logSource{Name: item.name, Label: item.label, Bytes: info.Size()})
 	}
-	sort.SliceStable(sources, func(i, j int) bool { return sources[i].Name < sources[j].Name })
 	writeJSON(w, http.StatusOK, map[string]any{"sources": sources})
 }
 
@@ -182,5 +195,5 @@ func tailLines(file *os.File, n int) (string, error) {
 }
 
 func countLines(b []byte) int {
-	return strings.Count(string(b), "\n")
+	return bytes.Count(b, []byte("\n"))
 }
