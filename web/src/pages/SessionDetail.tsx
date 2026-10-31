@@ -65,7 +65,9 @@ export default function SessionDetail({ id }: { id: string }) {
   const lastOffset = events.reduce((max, e) => Math.max(max, e.videoOffsetMs), 0);
 
   return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-6">
+    // 详情页的主体是画面证据：栏宽给到 1440，录像列再单独放大，
+    // 否则在宽屏上录像只有一张邮票大，读者得点开才能看清发生了什么。
+    <div className="mx-auto flex w-full max-w-[88rem] flex-col gap-6">
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Button variant="ghost" size="sm" render={<a href="#/sessions" />}>
@@ -130,12 +132,16 @@ export default function SessionDetail({ id }: { id: string }) {
         </ol>
       )}
 
+      {/* 完整录像不折叠：它是这段会话唯一能"从头看一遍"的东西，
+          藏在折叠项里等于没有。日志才是附录——出问题时才翻。 */}
+      <section className="flex flex-col gap-3 border-t pt-5">
+        <h2 className="text-sm font-medium">完整录像</h2>
+        <VideoAppendix session={session} />
+      </section>
+
       <details className="border-t pt-4">
-        <summary className="cursor-pointer text-sm text-muted-foreground select-none">
-          附录：完整录像与日志
-        </summary>
-        <div className="mt-4 flex flex-col gap-4">
-          <VideoAppendix session={session} />
+        <summary className="cursor-pointer text-sm text-muted-foreground select-none">附录：容器与应用日志</summary>
+        <div className="mt-4">
           <LogPanel sessionId={session.id} />
         </div>
       </details>
@@ -508,7 +514,7 @@ function BatchRow({
   const end = Math.max(0, group.events[group.events.length - 1].videoOffsetMs);
 
   return (
-    <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,26rem)] sm:gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,30rem)]">
+    <li className="grid gap-3 py-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] sm:gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,38rem)]">
       <div className="flex min-w-0 flex-col gap-2">
         <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
           <span className="font-mono text-[11px] text-muted-foreground tabular-nums">

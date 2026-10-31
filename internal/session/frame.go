@@ -104,8 +104,8 @@ func (m *Manager) Poster(ctx context.Context, id string) (string, error) {
 //
 // 不去读 window.json 那类"某一刻的快照"：应用随时可能自己改窗口，
 // 想知道"现在多大"，只能现场量。
-func (m *Manager) probeWindowGeometry(ctx context.Context, container string) (store.Rect, store.Rect, error) {
-	display := fmt.Sprintf("DISPLAY=:%d", m.cfg.Display.Num)
+func (m *Manager) probeWindowGeometry(ctx context.Context, container string, slot int) (store.Rect, store.Rect, error) {
+	display := fmt.Sprintf("DISPLAY=:%d", m.displayOf(slot))
 	out, err := m.docker.Exec(ctx, container, "env", display, "rig-window-geometry")
 	if err != nil {
 		return store.Rect{}, store.Rect{}, err

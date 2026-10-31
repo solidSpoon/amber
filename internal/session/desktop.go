@@ -28,7 +28,7 @@ func (m *Manager) xdotool(ctx context.Context, id string, args ...string) error 
 	if !ok || live.session.Container == "" {
 		return fmt.Errorf("会话 %s 不在运行中", id)
 	}
-	display := fmt.Sprintf("DISPLAY=:%d", m.cfg.Display.Num)
+	display := fmt.Sprintf("DISPLAY=:%d", m.displayOf(live.session.Slot))
 	cmd := append([]string{"env", display, "xdotool"}, args...)
 	if _, err := m.docker.Exec(ctx, live.session.Container, cmd...); err != nil {
 		return fmt.Errorf("桌面输入失败: %w", err)

@@ -71,11 +71,11 @@ func (m *Manager) grabScreen(ctx context.Context, id, prefix string, maxWidth in
 	}
 
 	cmd := []string{
-		"env", fmt.Sprintf("DISPLAY=:%d", m.cfg.Display.Num),
+		"env", fmt.Sprintf("DISPLAY=:%d", m.displayOf(live.session.Slot)),
 		"ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
 		"-f", "x11grab",
 		"-video_size", fmt.Sprintf("%dx%d", width, height),
-		"-i", fmt.Sprintf(":%d", m.cfg.Display.Num),
+		"-i", fmt.Sprintf(":%d", m.displayOf(live.session.Slot)),
 		"-frames:v", "1",
 		"-vf", fmt.Sprintf("scale='min(%d,iw)':-2", maxWidth),
 		"-q:v", "3", "-y",

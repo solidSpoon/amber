@@ -216,7 +216,7 @@ function MachineCard({ machine }: { machine: Machine }) {
 
       {/* 铭牌 */}
       <div className="mt-3 flex w-full flex-col gap-1 px-1">
-        <div className="flex items-baseline justify-between gap-3">
+        <div className="flex items-baseline gap-2">
           <div className="flex items-baseline gap-2">
             <span className="text-sm font-semibold">{machineName(machine.slot)}</span>
             {online ? (
@@ -227,16 +227,21 @@ function MachineCard({ machine }: { machine: Machine }) {
               <Badge variant="outline">空闲</Badge>
             )}
           </div>
-          {online && machine.sessionId && (
-            <a href={`#/sessions/${machine.sessionId}`} className="font-mono text-[11px] hover:underline">
-              {machine.sessionId} →
-            </a>
-          )}
         </div>
+        {/* 铭牌上写「这台机器此刻在干什么」，不写会话 ID：ID 是内部编号，
+            人看的是这台机器被谁占着、在做什么。单独一行，避免被挤到卡片另一头。 */}
+        {online && machine.sessionId && (
+          <a
+            href={`#/sessions/${machine.sessionId}`}
+            className="max-w-full truncate text-xs text-foreground/80 hover:text-foreground hover:underline"
+          >
+            {machine.title || machine.app || '这次会话'} →
+          </a>
+        )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
           {online ? (
             <>
-              <span className="font-mono">{machine.ref || '—'}</span>
+              {machine.ref && <span className="font-mono">{machine.ref}</span>}
               {machine.statsOk ? (
                 <>
                   <span>CPU {machine.stats.CPUPct.toFixed(0)}%</span>

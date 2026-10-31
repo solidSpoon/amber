@@ -96,7 +96,7 @@ func Load() (*Config, error) {
 		Display: DisplayConfig{
 			Width:  envInt("RIGD_DISPLAY_W", 1280),
 			Height: envInt("RIGD_DISPLAY_H", 800),
-			Num:    envInt("RIGD_DISPLAY_NUM", 99),
+			Num:    envInt("RIGD_DISPLAY_NUM", 90),
 		},
 		Record: RecordConfig{
 			FPS: envInt("RIGD_RECORD_FPS", 20),
@@ -113,8 +113,11 @@ func Load() (*Config, error) {
 	if cfg.Display.Width < 640 || cfg.Display.Height < 480 {
 		return nil, fmt.Errorf("虚拟屏尺寸过小：%dx%d", cfg.Display.Width, cfg.Display.Height)
 	}
-	if cfg.Display.Num < 0 || cfg.Display.Num > 99 {
-		return nil, fmt.Errorf("RIGD_DISPLAY_NUM 需在 0~99，收到 %d", cfg.Display.Num)
+	// 每台机器占一个屏号（基准 + 槽位）：容器走 --network=host，X 的抽象套接字
+	// 落在共享网络命名空间里，两台机器同号必然撞车，所以必须能排到 MaxSessions 个。
+	if cfg.Display.Num < 0 || cfg.Display.Num+cfg.MaxSessions-1 > 99 {
+		return nil, fmt.Errorf("RIGD_DISPLAY_NUM 需在 0~%d（基准 + 槽位不能超过 99），收到 %d",
+			100-cfg.MaxSessions, cfg.Display.Num)
 	}
 	if cfg.Record.FPS < 1 || cfg.Record.FPS > 60 {
 		return nil, fmt.Errorf("RIGD_RECORD_FPS 需在 1~60，收到 %d", cfg.Record.FPS)

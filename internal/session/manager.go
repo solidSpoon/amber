@@ -253,6 +253,18 @@ func (m *Manager) releaseSources(ctx context.Context, sess store.Session) {
 	}
 }
 
+// displayOf 是这台机器在容器里的 X 屏号。
+//
+// 一槽位一号是硬要求：容器走 --network=host，X 的抽象套接字落在共享网络命名空间里
+// （不受 /tmp 隔离），两台机器都用同一个号时，后起的那台会直接
+// "server already running" 起不来。号跟槽位绑，重启后同一槽位还是同一个号。
+//
+// 控制面所有 x11 命令（录屏取景、整屏抓帧、xdotool）都必须走这里，
+// 否则抓到的是另一块屏，画面要么全黑要么张冠李戴。
+func (m *Manager) displayOf(slot int) int {
+	return m.cfg.Display.Num + slot
+}
+
 // Provision 起容器并等应用就绪：docker run → 等 CDP → 读录像起点 → 置 ready。
 //
 // 就绪失败会把会话标记 failed 并停掉容器，绝不留下「容器活着但连不上」的空壳。
@@ -283,11 +295,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 		"RIG_ENTRY":      payload.Entry,
 		"RIG_READY_CDP":  fmt.Sprint(payload.Recipe.Ready.CDP),
 		"RIG_READY_SEC":  fmt.Sprint(payload.Recipe.Ready.TimeoutSec),
-		// 每台机器一个独立的屏号。容器走 --network=host，X 的 socket 落在
-		// 共享的网络命名空间里（抽象套接字不受 /tmp 隔离），两台机器都用 :99
-		// 时后起的那台会直接 "server already running" 起不来。
-		// 屏号跟槽位绑，重启后同一槽位还是同一个号，录像取景不用重算。
-		"DISPLAY_NUM": fmt.Sprint(90 + sess.Slot),
+		"DISPLAY_NUM": fmt.Sprint(m.displayOf(sess.Slot)),
 	}
 	argsJSON := "[]"
 	if len(payload.Recipe.Args) > 0 {
@@ -372,7 +380,7 @@ func (m *Manager) Provision(ctx context.Context, sess store.Session) (store.Sess
 	if err := m.waitContainerReady(ctx, containerName); err != nil {
 		m.log.Warn("等待容器就绪标记超时，会话仍继续", "session", id, "err", err)
 	}
-	if frame, display, err := m.probeWindowGeometry(ctx, containerName); err != nil {
+	if frame, display, err := m.probeWindowGeometry(ctx, containerName, sess.Slot); err != nil {
 		m.log.Warn("读不到画面几何，界面将按整幅画面显示", "session", id, "err", err)
 	} else {
 		sess.Frame = frame
@@ -835,6 +843,7 @@ type MachineView struct {
 	Occupied  bool          `json:"occupied"`
 	SessionID string        `json:"sessionId,omitempty"`
 	App       string        `json:"app,omitempty"`
+	Title     string        `json:"title,omitempty"`
 	Ref       string        `json:"ref,omitempty"`
 	Status    string        `json:"status,omitempty"`
 	Since     time.Time     `json:"since,omitempty"`
@@ -873,6 +882,7 @@ func (m *Manager) Machines(ctx context.Context) ([]MachineView, error) {
 			view.Occupied = true
 			view.SessionID = sessID
 			view.App = sess.App
+			view.Title = sess.Title
 			view.Ref = sess.Ref
 			view.Status = string(sess.Status)
 			view.Since = sess.StartedAt
@@ -966,7 +976,7 @@ func (m *Manager) RecoverSessions(ctx context.Context) (int, error) {
 		if dialErr == nil {
 			live.inspector = inspector
 			// 接管时同样不碰窗口，只重新量一次几何（应用重启后可能换了尺寸）
-			if frame, display, geoErr := m.probeWindowGeometry(ctx, "rigd-"+sess.ID); geoErr == nil {
+			if frame, display, geoErr := m.probeWindowGeometry(ctx, "rigd-"+sess.ID, sess.Slot); geoErr == nil {
 				sess.Frame = frame
 				sess.Display = display
 				_ = m.store.UpdateSession(ctx, sess)
@@ -1108,7 +1118,7 @@ func (m *Manager) syncFrame(ctx context.Context, id string, insp Inspector) {
 	// 视口变了，现量一次精确的窗口矩形（含位置）；量不到就按左上角+视口尺寸算
 	frame := store.Rect{X: sess.Frame.X, Y: sess.Frame.Y, Width: width, Height: height}
 	display := sess.Display
-	if exact, gotDisplay, geoErr := m.probeWindowGeometry(ctx, "rigd-"+id); geoErr == nil {
+	if exact, gotDisplay, geoErr := m.probeWindowGeometry(ctx, "rigd-"+id, sess.Slot); geoErr == nil {
 		frame, display = exact, gotDisplay
 	}
 	if !display.Known() {

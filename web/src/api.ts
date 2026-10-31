@@ -84,6 +84,8 @@ export interface Machine {
   occupied: boolean;
   sessionId?: string;
   app?: string;
+  /** 这次会话的一句话意图；有它就先展示它，没有才退回产物名 */
+  title?: string;
   ref?: string;
   status?: SessionStatus;
   since?: string;
