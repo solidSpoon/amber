@@ -50,9 +50,6 @@ type Client struct {
 	nextQuery int
 }
 
-// Factory 按端口创建检查器；抽出接口是为了让调度器可以在测试里注入假实现。
-type Factory func(ctx context.Context, port int) (*Client, error)
-
 // Dial 连到一个已经就绪的调试端口。
 func Dial(ctx context.Context, port int) (*Client, error) {
 	// 冷启动要 clone + 装依赖 + 构建 + 启动，5 分钟是实测最坏情况的上限
@@ -66,10 +63,12 @@ func Dial(ctx context.Context, port int) (*Client, error) {
 // Close 断开连接。
 func (c *Client) Close() error { return c.cdp.Close() }
 
-// snapshotScript 收集页面上值得让 AI 看到的东西。
+// jsElementHelpers 是"页面上哪些元素算数"的唯一一份判断：快照用它列元素，
+// 按文字/选择器定位也用它找元素。
 //
-// 刻意不 dump 整棵 DOM：播放器/编辑器类界面的 DOM 动辄上万节点，塞进上下文既贵又噪声大。
-const snapshotScript = `(() => {
+// 两份各写一遍的后果很具体：快照里列得出的元素，定位却找不到（或者反过来），
+// 模型拿着引用号点不动，只能猜。
+const jsElementHelpers = `  const SEL = 'button,a[href],input,textarea,select,[role],[data-testid],[data-slot],h1,h2,h3,h4,video,[contenteditable="true"]';
   const visible = (el) => {
     const r = el.getBoundingClientRect();
     const s = getComputedStyle(el);
@@ -91,16 +90,24 @@ const snapshotScript = `(() => {
   const nameOf = (el) => (el.getAttribute('aria-label') || el.getAttribute('placeholder')
     || el.getAttribute('title') || (el.innerText || '').replace(/\s+/g, ' ').trim()
     || el.value || '').slice(0, 120);
-  const sel = 'button,a[href],input,textarea,select,[role],[data-testid],[data-slot],h1,h2,h3,h4,video,[contenteditable="true"]';
-  const out = [];
-  for (const el of document.querySelectorAll(sel)) {
-    if (!visible(el)) continue;
+  const boxOf = (el) => {
     const r = el.getBoundingClientRect();
+    return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)];
+  };`
+
+// snapshotScript 收集页面上值得让 AI 看到的东西。
+//
+// 刻意不 dump 整棵 DOM：播放器/编辑器类界面的 DOM 动辄上万节点，塞进上下文既贵又噪声大。
+const snapshotScript = `(() => {
+` + jsElementHelpers + `
+  const out = [];
+  for (const el of document.querySelectorAll(SEL)) {
+    if (!visible(el)) continue;
     out.push({
       role: roleOf(el),
       name: nameOf(el),
       testid: el.getAttribute('data-testid') || el.getAttribute('data-slot') || '',
-      box: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+      box: boxOf(el),
     });
   }
   return {
@@ -109,6 +116,25 @@ const snapshotScript = `(() => {
     elements: out.slice(0, 120),
     text: (document.body.innerText || '').replace(/\n{2,}/g, '\n').trim().slice(0, 2000),
   };
+})()`
+
+// locateScript 按「可见文字」或「CSS 选择器」现找元素。
+//
+// 为什么需要它：引用号是某一次 snapshot 的产物，页面一变就作废。批里
+// 「点完这步、页面翻页、再点下一步」这种连招，根本没法事先写出引用号。
+const locateScript = `(() => {
+` + jsElementHelpers + `
+  const wanted = %s;
+  const selector = %s;
+  const candidates = [...document.querySelectorAll(SEL)].filter(visible);
+  let el = null;
+  if (selector) {
+    el = candidates.find((e) => e.matches(selector)) || document.querySelector(selector);
+  } else {
+    el = candidates.find((e) => nameOf(e) === wanted) || candidates.find((e) => nameOf(e).includes(wanted));
+  }
+  if (!el) return null;
+  return { role: roleOf(el), name: nameOf(el), box: boxOf(el) };
 })()`
 
 // Snapshot 读页面结构，并为每个元素分配引用号。
@@ -147,45 +173,6 @@ func (c *Client) Resolve(ref string) (Element, error) {
 	return el, nil
 }
 
-// locateScript 按「可见文字」或「CSS 选择器」现找元素。
-//
-// 为什么需要它：引用号是某一次 snapshot 的产物，页面一变就作废。批里
-// 「点完这步、页面翻页、再点下一步」这种连招，根本没法事先写出引用号。
-const locateScript = `(() => {
-  const SEL = 'button,a[href],input,textarea,select,[role],[data-testid],[data-slot]';
-  const nameOf = (el) => (el.getAttribute('aria-label') || el.getAttribute('placeholder')
-    || el.getAttribute('title') || (el.innerText || '').replace(/\s+/g, ' ').trim()
-    || el.value || '').slice(0, 120);
-  const visible = (el) => {
-    const r = el.getBoundingClientRect();
-    const s = getComputedStyle(el);
-    return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.display !== 'none';
-  };
-  const roleOf = (el) => {
-    const explicit = el.getAttribute('role');
-    if (explicit) return explicit;
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'button') return 'button';
-    if (tag === 'a') return 'link';
-    if (tag === 'input') return el.type === 'text' || !el.type ? 'textbox' : el.type;
-    if (tag === 'textarea') return 'textbox';
-    if (tag === 'select') return 'combobox';
-    return tag;
-  };
-  const wanted = %s;
-  const selector = %s;
-  const candidates = [...document.querySelectorAll(SEL)].filter(visible);
-  let el = null;
-  if (selector) {
-    el = candidates.find((e) => e.matches(selector)) || document.querySelector(selector);
-  } else {
-    el = candidates.find((e) => nameOf(e) === wanted) || candidates.find((e) => nameOf(e).includes(wanted));
-  }
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  return { role: roleOf(el), name: nameOf(el), box: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] };
-})()`
-
 // Locate 按文字或选择器找元素，并登记成一个引用号。
 //
 // 登记之后它和 snapshot 给的引用完全一样：点击、填写、截图高亮、记录里那句
@@ -219,14 +206,18 @@ func (c *Client) Locate(ctx context.Context, match, selector string) (string, er
 	return ref, nil
 }
 
+// center 元素中心点的页面坐标：点、悬停、填写都按它算。
+func (e Element) center() (float64, float64) {
+	return float64(e.Box[0]) + float64(e.Box[2])/2, float64(e.Box[1]) + float64(e.Box[3])/2
+}
+
 // Click 点击引用号对应的元素（先滚动到可见，再按中心点派发真实鼠标事件）。
 func (c *Client) Click(ctx context.Context, ref string) error {
 	el, err := c.Resolve(ref)
 	if err != nil {
 		return err
 	}
-	x := float64(el.Box[0]) + float64(el.Box[2])/2
-	y := float64(el.Box[1]) + float64(el.Box[3])/2
+	x, y := el.center()
 	return c.cdp.ClickAt(ctx, x, y)
 }
 
@@ -239,8 +230,7 @@ func (c *Client) Hover(ctx context.Context, ref string) error {
 	if err != nil {
 		return err
 	}
-	x := float64(el.Box[0]) + float64(el.Box[2])/2
-	y := float64(el.Box[1]) + float64(el.Box[3])/2
+	x, y := el.center()
 	// 走出一点轨迹：悬停浮层通常要连续几个 mousemove 才判定"停在了这个元素上"，
 	// 一步跳进去往往只触发一次 mouseover，随后就被判成移出。
 	for _, dx := range []float64{-12, -6, 0, 6, 12} {
@@ -268,8 +258,7 @@ func (c *Client) Fill(ctx context.Context, ref, text string) error {
 	if err != nil {
 		return err
 	}
-	x := float64(el.Box[0]) + float64(el.Box[2])/2
-	y := float64(el.Box[1]) + float64(el.Box[3])/2
+	x, y := el.center()
 	if err := c.cdp.ClickAt(ctx, x, y); err != nil {
 		return err
 	}
